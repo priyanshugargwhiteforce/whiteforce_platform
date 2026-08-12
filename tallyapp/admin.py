@@ -36,3 +36,13 @@ class EMDLedgerAdmin(admin.ModelAdmin):
     list_filter = ["emd_status", "financial_year"]
     search_fields = ["ledger__ledger_name"]
     ordering = ["ledger__ledger_name"]
+
+# @admin.register(EMDLedger)
+# class EMDLedgerAdmin(admin.ModelAdmin):
+#     list_display = [
+#         "ledger", "emd_status", "opening_balance",
+#         "nett_transactions", "closing_balance", "financial_year", "last_synced"
+#     ]
+#     list_filter = ["emd_status", "financial_year"]
+#     search_fields = ["ledger__ledger_name"]
+#     ordering = ["ledger__ledger_name"]
