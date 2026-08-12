@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Vouchers — DB Test Viewer</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#161922; --border:#262b38; --text:#e8eaf0;
+    --muted:#8a90a3; --accent:#5b8cff; --accent2:#2ec27e; --danger:#ff5b6a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,Arial,sans-serif}
+  header{padding:20px 28px;border-bottom:1px solid var(--border)}
+  .back{color:var(--muted);text-decoration:none;font-size:13px}
+  .back:hover{color:var(--text)}
+  h1{font-size:20px;margin:10px 0 4px}
+  .sub{color:var(--muted);font-size:13px}
+  main{padding:24px 28px;max-width:1100px;margin:0 auto}
+  .toolbar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+  select,input{background:var(--card);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px}
+  button{background:var(--accent);border:none;color:white;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+  th,td{padding:12px 14px;text-align:left;font-size:14px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  tbody tr.voucher-row{cursor:pointer}
+  tbody tr.voucher-row:hover{background:#1c2030}
+  .amt{font-variant-numeric:tabular-nums;text-align:right}
+  .status{color:var(--muted);font-size:13px;margin:10px 0}
+  .empty{padding:40px;text-align:center;color:var(--muted)}
+  .breakdown-row td{background:#11141c;padding:0}
+  .breakdown-wrap{padding:14px 14px 18px 34px}
+  .breakdown-title{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px}
+  .bline{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--border);font-size:13px}
+  .bline:last-child{border-bottom:none}
+  .bline .amt.pos{color:var(--accent2)}
+  .bline .amt.neg{color:var(--danger)}
+  .chev{display:inline-block;transition:transform .15s;color:var(--muted)}
+  .chev.open{transform:rotate(90deg)}
+  .badge{background:#1e2330;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:999px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="#" onclick="goBack()">&larr; Back to Ledgers</a>
+  <h1 id="ledgerTitle">Vouchers</h1>
+  <div class="sub" id="ledgerSub"></div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <label class="sub" for="fy">Financial Year:</label>
+    <select id="fy">
+      <option value="">All</option>
+      <option value="2023-24">2023-24</option>
+      <option value="2024-25">2024-25</option>
+      <option value="2025-26">2025-26</option>
+      <option value="2026-27" selected>2026-27</option>
+    </select>
+    <button onclick="loadVouchers()">Refresh</button>
+  </div>
+  <div id="status" class="status"></div>
+  <table id="voucherTable" style="display:none">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Voucher No</th>
+        <th>Type</th>
+        <th>Party</th>
+        <th style="text-align:right">Amount</th>
+      </tr>
+    </thead>
+    <tbody id="voucherBody"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none">No vouchers found in the database for this ledger yet.</div>
+</main>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const ledgerId = params.get('ledger_id');
+const ledgerName = params.get('ledger_name') || '';
+const apiBase = (params.get('api_base') || 'http://localhost:8000/python/office/api').replace(/\/$/, '');
+
+document.getElementById('ledgerTitle').textContent = ledgerName || `Ledger #${ledgerId}`;
+document.getElementById('ledgerSub').textContent = `Vouchers loaded from Postgres`;
+
+function goBack() {
+  window.location.href = `ledgers.html`;
+}
+
+function fmtMoney(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return v;
+  return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtDate(d) {
+  // Tally format YYYYMMDD -> DD-MM-YYYY
+  if (!d || d.length !== 8) return d || '—';
+  return `${d.slice(6,8)}-${d.slice(4,6)}-${d.slice(0,4)}`;
+}
+
+async function loadVouchers() {
+  const statusEl = document.getElementById('status');
+  const table = document.getElementById('voucherTable');
+  const empty = document.getElementById('empty');
+  const fy = document.getElementById('fy').value;
+
+  if (!ledgerId) {
+    statusEl.textContent = 'No ledger_id in URL — go back and pick a ledger.';
+    return;
+  }
+
+  statusEl.textContent = 'Loading…';
+  table.style.display = 'none';
+  empty.style.display = 'none';
+
+  try {
+    const url = new URL(`${apiBase}/db/ledgers/${ledgerId}/vouchers/`);
+    if (fy) url.searchParams.set('fy', fy);
+    const res = await fetch(url);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Request failed');
+
+    statusEl.textContent = `${json.count} voucher(s) loaded from DB`;
+    renderVouchers(json.data || []);
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}`;
+  }
+}
+
+function renderVouchers(list) {
+  const body = document.getElementById('voucherBody');
+  const table = document.getElementById('voucherTable');
+  const empty = document.getElementById('empty');
+  body.innerHTML = '';
+
+  if (!list.length) {
+    table.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  table.style.display = 'table';
+  empty.style.display = 'none';
+
+  for (const v of list) {
+    const tr = document.createElement('tr');
+    tr.className = 'voucher-row';
+    tr.innerHTML = `
+      <td><span class="chev">&#9656;</span> ${fmtDate(v.date)}</td>
+      <td>${v.voucher_no || '<span class="badge">—</span>'}</td>
+      <td>${v.voucher_type || '—'}</td>
+      <td>${v.party_ledger || '—'}</td>
+      <td class="amt">${fmtMoney(v.amount)}</td>
+    `;
+    tr.onclick = () => toggleBreakdown(tr, v);
+    body.appendChild(tr);
+  }
+}
+
+async function toggleBreakdown(row, voucher) {
+  const chev = row.querySelector('.chev');
+  const existing = row.nextElementSibling;
+
+  if (existing && existing.classList.contains('breakdown-row')) {
+    existing.remove();
+    chev.classList.remove('open');
+    return;
+  }
+
+  // close any other open breakdown rows
+  document.querySelectorAll('.breakdown-row').forEach(r => r.remove());
+  document.querySelectorAll('.chev.open').forEach(c => c.classList.remove('open'));
+
+  chev.classList.add('open');
+
+  const bRow = document.createElement('tr');
+  bRow.className = 'breakdown-row';
+  bRow.innerHTML = `<td colspan="5"><div class="breakdown-wrap">Loading breakdown…</div></td>`;
+  row.parentNode.insertBefore(bRow, row.nextSibling);
+
+  try {
+    const res = await fetch(`${apiBase}/db/vouchers/${voucher.id}/breakdown/`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Request failed');
+
+    const lines = json.data || [];
+    const wrap = bRow.querySelector('.breakdown-wrap');
+    if (!lines.length) {
+      wrap.innerHTML = `<div class="breakdown-title">Breakdown</div><div class="sub">No breakdown lines stored for this voucher.</div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <div class="breakdown-title">Breakdown — ${voucher.voucher_no || voucher.guid || ''}</div>
+      ${lines.map(l => `
+        <div class="bline">
+          <span>${l.ledger_name}</span>
+          <span class="amt ${parseFloat(l.amount) < 0 ? 'neg' : 'pos'}">${fmtMoney(l.amount)}</span>
+        </div>
+      `).join('')}
+      ${voucher.narration ? `<div class="sub" style="margin-top:10px">Narration: ${voucher.narration}</div>` : ''}
+    `;
+  } catch (err) {
+    bRow.querySelector('.breakdown-wrap').innerHTML = `<div style="color:var(--danger)">Error: ${err.message}</div>`;
+  }
+}
+
+loadVouchers();
+</script>
+</body>
+</html>

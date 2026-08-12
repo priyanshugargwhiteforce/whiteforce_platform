@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ledgers — DB Test Viewer</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#161922; --border:#262b38; --text:#e8eaf0;
+    --muted:#8a90a3; --accent:#5b8cff; --accent2:#2ec27e; --danger:#ff5b6a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,Arial,sans-serif}
+  header{padding:20px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+  h1{font-size:20px;margin:0}
+  .sub{color:var(--muted);font-size:13px;margin-top:4px}
+  .config{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  input,select{background:var(--card);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px}
+  input#apiBase{width:340px}
+  button{background:var(--accent);border:none;color:white;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
+  button:hover{opacity:.9}
+  main{padding:24px 28px;max-width:1100px;margin:0 auto}
+  .toolbar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+  #search{flex:1;min-width:200px}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+  th,td{padding:12px 14px;text-align:left;font-size:14px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  tbody tr{cursor:pointer;transition:background .1s}
+  tbody tr:hover{background:#1c2030}
+  tbody tr:last-child td{border-bottom:none}
+  .ledger-name{color:var(--accent);font-weight:600}
+  .amt{font-variant-numeric:tabular-nums;text-align:right}
+  .pos{color:var(--accent2)} .neg{color:var(--danger)}
+  .badge{background:#1e2330;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:999px;font-size:12px}
+  .status{color:var(--muted);font-size:13px;margin:10px 0}
+  .empty{padding:40px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Ledgers</h1>
+    <div class="sub">Reading straight from Postgres — no live Tally call</div>
+  </div>
+  <div class="config">
+    <label for="apiBase" class="sub">API base:</label>
+    <input id="apiBase" type="text" placeholder="http://localhost:8000/python/xyz/api">
+    <button onclick="saveBaseAndReload()">Load</button>
+  </div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <input id="search" type="text" placeholder="Search ledger name...">
+    <button onclick="loadLedgers()">Refresh</button>
+  </div>
+  <div id="status" class="status"></div>
+  <table id="ledgerTable" style="display:none">
+    <thead>
+      <tr>
+        <th>Ledger Name</th>
+        <th>Parent Group</th>
+        <th style="text-align:right">Closing Balance</th>
+        <th style="text-align:center">Vouchers</th>
+      </tr>
+    </thead>
+    <tbody id="ledgerBody"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none">No ledgers found in the database yet. Hit your live sync endpoint at least once to populate Postgres, then refresh here.</div>
+</main>
+
+<script>
+// ---- config ---------------------------------------------------------
+// Change this default to match how your Django project is mounted, e.g.
+// "http://localhost:8000/python/office/api" (tally_tag = "office").
+// You can also just type the correct value into the box above and hit Load.
+const DEFAULT_API_BASE = "http://localhost:8000/python/office/api";
+
+function getApiBase() {
+  return document.getElementById('apiBase').value.trim().replace(/\/$/, '');
+}
+function saveBaseAndReload() {
+  window.__apiBase = getApiBase();
+  loadLedgers();
+}
+
+function fmtMoney(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return v;
+  return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+let allLedgers = [];
+
+async function loadLedgers() {
+  const base = getApiBase();
+  const statusEl = document.getElementById('status');
+  const table = document.getElementById('ledgerTable');
+  const empty = document.getElementById('empty');
+  statusEl.textContent = 'Loading…';
+  table.style.display = 'none';
+  empty.style.display = 'none';
+
+  try {
+    const res = await fetch(`${base}/db/ledgers/`);
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Request failed');
+
+    allLedgers = json.data || [];
+    statusEl.textContent = `${json.count} ledger(s) loaded from DB (tag: ${json.tally_tag})`;
+    renderLedgers(allLedgers);
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}. Check the API base URL above and that Django/CORS is running.`;
+  }
+}
+
+function renderLedgers(list) {
+  const body = document.getElementById('ledgerBody');
+  const table = document.getElementById('ledgerTable');
+  const empty = document.getElementById('empty');
+  body.innerHTML = '';
+
+  if (!list.length) {
+    table.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  table.style.display = 'table';
+  empty.style.display = 'none';
+
+  for (const l of list) {
+    const tr = document.createElement('tr');
+    const bal = parseFloat(l.closing_balance);
+    tr.innerHTML = `
+      <td class="ledger-name">${l.ledger_name}</td>
+      <td>${l.parent || '<span class="badge">—</span>'}</td>
+      <td class="amt ${bal < 0 ? 'neg' : 'pos'}">${fmtMoney(l.closing_balance)}</td>
+      <td style="text-align:center"><span class="badge">${l.voucher_count}</span></td>
+    `;
+    tr.onclick = () => {
+      const url = `vouchers.html?ledger_id=${l.id}&ledger_name=${encodeURIComponent(l.ledger_name)}&api_base=${encodeURIComponent(getApiBase())}`;
+      window.location.href = url;
+    };
+    body.appendChild(tr);
+  }
+}
+
+document.getElementById('search').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  renderLedgers(allLedgers.filter(l => l.ledger_name.toLowerCase().includes(q)));
+});
+
+// init
+document.getElementById('apiBase').value = DEFAULT_API_BASE;
+loadLedgers();
+</script>
+</body>
+</html>
