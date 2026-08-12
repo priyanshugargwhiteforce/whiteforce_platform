@@ -25,3 +25,4 @@ credentials/new.txt
 .vscode/
 .idea/
 frontend/
+db.sqlite3
