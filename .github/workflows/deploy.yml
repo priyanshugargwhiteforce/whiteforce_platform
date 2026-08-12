@@ -1,0 +1,34 @@
+name: Deploy WhiteForce Python Django
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Production VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          script: |
+            set -e
+
+            echo "=========================================="
+            echo "WhiteForce Python Django Deployment"
+            echo "=========================================="
+
+            /root/home/deploy_wf_python.sh
+
+            echo "=========================================="
+            echo "Deployment completed successfully"
+            echo "=========================================="
