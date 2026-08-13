@@ -1,6 +1,8 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 
+from notifications.authentication import ApiKeyAuthentication
 from .models import TallyInstance, Ledger, Voucher, VoucherBreakdown, EMDLedger
 from  tally_config import get_instance, get_all_instances
 from .services.tally_client import TallyClient
@@ -23,12 +25,22 @@ FINANCIAL_YEARS = {
 DEFAULT_TALLY_TAG = "office"  # fallback tag when none is provided in URL
 
 
+class SecureAPIView(APIView):
+    """
+    Base class for every view in this app. Reuses the project-wide
+    X-API-KEY authentication (notifications/authentication.py) so the
+    same key already used by other apps works here too.
+    """
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticated]
+
+
 def make_client(tally_tag=None) -> TallyClient:
     instance = get_instance(tally_tag) if tally_tag is not None else get_instance(DEFAULT_TALLY_TAG)
     return TallyClient(instance["url"])
 
 
-class TallyInstanceListView(APIView):
+class TallyInstanceListView(SecureAPIView):
     """
     GET  /python/api/tally-instances/           -> list all active instances
     POST /python/api/tally-instances/           -> register/update an instance by tag
@@ -72,7 +84,7 @@ class TallyInstanceListView(APIView):
         }, status=201 if created else 200)
 
 
-class TallyInstanceDetailView(APIView):
+class TallyInstanceDetailView(SecureAPIView):
     """
     DELETE /python/api/tally-instances/<tag>/   -> deactivate an instance
     """
@@ -88,7 +100,7 @@ class TallyInstanceDetailView(APIView):
         return Response({"success": True, "message": f"Tag '{tag}' deactivated"})
 
 
-class PendingBillsView(APIView):
+class PendingBillsView(SecureAPIView):
     def get(self, request, tally_tag=None):
         try:
             client = make_client(tally_tag)
@@ -106,7 +118,7 @@ class PendingBillsView(APIView):
             return Response({"success": False, "error": str(e)}, status=500)
 
 
-class LedgerListView(APIView):
+class LedgerListView(SecureAPIView):
     def get(self, request, tally_tag=None):
         try:
             client = make_client(tally_tag)
@@ -124,7 +136,7 @@ class LedgerListView(APIView):
             return Response({"success": False, "error": str(e)}, status=500)
 
 
-class VoucherListView(APIView):
+class VoucherListView(SecureAPIView):
     def get(self, request, ledger_name, tally_tag=None):
         try:
             fy        = request.query_params.get("fy", "2026-27")
@@ -161,7 +173,7 @@ class VoucherListView(APIView):
             return Response({"success": False, "error": str(e)}, status=500)
 
 
-class BreakdownView(APIView):
+class BreakdownView(SecureAPIView):
     def get(self, request, master_id, tally_tag=None):
         try:
             client = make_client(tally_tag)
@@ -173,7 +185,7 @@ class BreakdownView(APIView):
             return Response({"success": False, "error": str(e)}, status=500)
 
 
-class EMDListView(APIView):
+class EMDListView(SecureAPIView):
     """
     GET /python/api/emd/                          -> default group "Deposits - EMD"
     GET /python/api/emd/?group=<custom group name> -> any other group's ledgers
@@ -199,7 +211,7 @@ class EMDListView(APIView):
             return Response({"success": False, "error": str(e)}, status=500)
 
 
-class DBEmdListView(APIView):
+class DBEmdListView(SecureAPIView):
     """
     GET /python/<tally_tag>/api/db/emd/               -> EMD ledgers already saved in Postgres
     GET /python/<tally_tag>/api/db/emd/?status=Closed  -> filter by status
@@ -236,7 +248,7 @@ class DBEmdListView(APIView):
         })
 
 
-class EMDBreakdownView(APIView):
+class EMDBreakdownView(SecureAPIView):
     def get(self, request, ledger_name, tally_tag=None):
         try:
             fy        = request.query_params.get("fy", "2026-27")
@@ -272,7 +284,7 @@ class EMDBreakdownView(APIView):
 # is unreachable / you just want to browse whatever's already synced.
 # ---------------------------------------------------------------------------
 
-class DBLedgerListView(APIView):
+class DBLedgerListView(SecureAPIView):
     """
     GET /python/<tally_tag>/api/db/ledgers/   -> ledgers already saved in Postgres
     Optional query params: ?search=abc  (filter by name, case-insensitive contains)
@@ -308,7 +320,7 @@ class DBLedgerListView(APIView):
         })
 
 
-class DBVoucherListView(APIView):
+class DBVoucherListView(SecureAPIView):
     """
     GET /python/<tally_tag>/api/db/ledgers/<ledger_id>/vouchers/
     -> vouchers already saved in Postgres for that ledger.
@@ -354,7 +366,7 @@ class DBVoucherListView(APIView):
         })
 
 
-class DBVoucherBreakdownView(APIView):
+class DBVoucherBreakdownView(SecureAPIView):
     """
     GET /python/<tally_tag>/api/db/vouchers/<voucher_id>/breakdown/
     -> breakdown lines already saved in Postgres for that voucher.
@@ -390,7 +402,7 @@ class DBVoucherBreakdownView(APIView):
         })
 
 
-class AllLedgersWithVouchersView(APIView):
+class AllLedgersWithVouchersView(SecureAPIView):
     def get(self, request, tally_tag=None):
         try:
             fy        = request.query_params.get("fy", "2026-27")
