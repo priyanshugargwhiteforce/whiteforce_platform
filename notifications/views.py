@@ -63,7 +63,13 @@ class CreateNotificationView(APIView):
             )
 
         serializer = NotificationCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            logger.warning(
+                "CreateNotification | validation failed | domain=%s | errors=%s | ip=%s",
+                domain, serializer.errors, _get_client_ip(request),
+            )
+            return Response(serializer.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
         notification = serializer.save(domain=domain)
 
         notification.html_content = notification.build_html_content(request=request)
@@ -114,7 +120,13 @@ class SendNotificationView(APIView):
             )
 
         serializer = NotificationSendSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            logger.warning(
+                "SendNotification | validation failed | domain=%s | errors=%s | ip=%s",
+                domain, serializer.errors, _get_client_ip(request),
+            )
+            return Response(serializer.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
         notification_id = serializer.validated_data['notification_id']
         fcm_tokens = serializer.validated_data['fcm_tokens']
 
@@ -200,6 +212,21 @@ class SendNotificationView(APIView):
             for token, log in zip(fcm_tokens, logs) if log.status == 'failed'
         ]
 
+        # All tokens failed -> FCM/upstream problem, not a plain 200
+        if batch_response.success_count == 0 and len(fcm_tokens) > 0:
+            return Response(
+                {
+                    "message": "Notification dispatch failed for all tokens.",
+                    "notification_id": notification.id,
+                    "domain": domain,
+                    "total_tokens": len(fcm_tokens),
+                    "success_count": batch_response.success_count,
+                    "failure_count": batch_response.failure_count,
+                    "failed_tokens": failed_tokens,
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
         return Response(
             {
                 "message": "Notification dispatch completed.",
@@ -251,7 +278,9 @@ class ValidateTokensView(APIView):
             )
 
         serializer = ValidateTokensSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
         fcm_tokens = serializer.validated_data['fcm_tokens']
 
         try:
@@ -337,9 +366,9 @@ class SendWiraNotificationView(APIView):
             return Response(
                 {
                     "success": False,
-                    "message": "Notification sent unsuccessfully",
+                    "message": f"Invalid domain '{domain}'. Must be one of {VALID_DOMAINS}.",
                 },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         serializer = SendWiraSerializer(data=request.data)
@@ -352,8 +381,9 @@ class SendWiraNotificationView(APIView):
                 {
                     "success": False,
                     "message": "Notification sent unsuccessfully",
+                    "errors": serializer.errors,
                 },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         data = serializer.validated_data
@@ -419,7 +449,8 @@ class SendWiraNotificationView(APIView):
                 tag, _get_client_ip(request),
             )
 
-            # Agar SAB tokens fail ho gaye, poore request ko unsuccessful treat karo
+            # Agar SAB tokens fail ho gaye, ye upstream (FCM) ki dikkat hai,
+            # server ki nahi -- isliye 502, 500 nahi.
             if batch_response.success_count == 0:
                 failed_tokens = [
                     {"token": t, "error": str(r.exception) if r.exception else "Unknown error"}
@@ -433,8 +464,9 @@ class SendWiraNotificationView(APIView):
                     {
                         "success": False,
                         "message": "Notification sent unsuccessfully",
+                        "failed_tokens": failed_tokens,
                     },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    status=status.HTTP_502_BAD_GATEWAY,
                 )
 
             response_payload = {
@@ -466,7 +498,7 @@ class SendWiraNotificationView(APIView):
                     "success": False,
                     "message": "Notification sent unsuccessfully",
                 },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status=status.HTTP_502_BAD_GATEWAY,
             )
         except Exception as exc:
             logger.error(
@@ -480,6 +512,8 @@ class SendWiraNotificationView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
 def _get_client_ip(request):
     x_forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
     if x_forwarded:
@@ -674,7 +708,9 @@ class UpdateNotificationView(APIView):
         notification = get_object_or_404(Notification, id=pk, domain=domain, is_deleted=False)
 
         serializer = NotificationUpdateSerializer(notification, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
         notification = serializer.save()
 
         notification.html_content = notification.build_html_content(request=request)

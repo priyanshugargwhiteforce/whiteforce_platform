@@ -18,6 +18,8 @@ urlpatterns = [
     path('api/', include('validator.urls')),
 
     path('api/', include('notifications.urls')),
+
+    path('api/resumes/', include('bulkresume.urls')),
 ]
 
 if settings.DEBUG:
