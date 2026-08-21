@@ -1,4 +1,5 @@
 import os
+import socket
 import platform
 import logging.config
 from pathlib import Path
@@ -246,13 +247,21 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_CONNECTION_MAX_RETRIES = None  # infinite retries, never give up
 CELERY_BROKER_CONNECTION_TIMEOUT = 30
 
+# Build keepalive options using real socket constants (fixes Error 22 on Linux —
+# previously hardcoded ints 1/2/3 didn't match TCP_KEEPIDLE/INTVL/CNT on this OS).
+# hasattr guard keeps this safe if it ever runs on macOS/Windows, where some of
+# these constants don't exist.
+_socket_keepalive_options = {}
+if hasattr(socket, 'TCP_KEEPIDLE'):
+    _socket_keepalive_options[socket.TCP_KEEPIDLE] = 60   # seconds before first probe
+if hasattr(socket, 'TCP_KEEPINTVL'):
+    _socket_keepalive_options[socket.TCP_KEEPINTVL] = 10  # interval between probes
+if hasattr(socket, 'TCP_KEEPCNT'):
+    _socket_keepalive_options[socket.TCP_KEEPCNT] = 5     # failed probes before dead
+
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     'socket_keepalive': True,
-    'socket_keepalive_options': {
-        1: 60,   # TCP_KEEPIDLE — seconds before sending keepalive probes
-        2: 10,   # TCP_KEEPINTVL — interval between probes
-        3: 5,    # TCP_KEEPCNT — number of failed probes before considering dead
-    },
+    'socket_keepalive_options': _socket_keepalive_options,
     'retry_on_timeout': True,
 }
 
