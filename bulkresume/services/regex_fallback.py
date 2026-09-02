@@ -27,6 +27,8 @@ def regex_extract_basic_fields(text: str) -> dict:
         "father_name": "",
         "mother_name": "",
         "known_languages": [],
+        "candidate_address": "",
+        "pincode_postal_code": "",
         "linkedin_url": linkedin_match.group() if linkedin_match else "",
         "other_urls": [u for u in urls if 'linkedin' not in u],
         "education": [],

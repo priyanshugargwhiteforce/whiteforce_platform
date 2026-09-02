@@ -32,6 +32,8 @@ class ResumeExtraction(BaseModel):
     father_name: str = ""
     mother_name: str = ""
     known_languages: List[str] = Field(default_factory=list)
+    candidate_address: str = ""
+    pincode_postal_code: str = ""
     linkedin_url: str = ""
     other_urls: List[str] = Field(default_factory=list)
     education: List[Education] = Field(default_factory=list)

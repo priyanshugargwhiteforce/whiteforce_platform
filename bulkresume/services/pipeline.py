@@ -82,6 +82,8 @@ def process_resume(resume_id: int) -> None:
                 "father_name": extracted.father_name,
                 "mother_name": extracted.mother_name,
                 "known_languages": extracted.known_languages,
+                "candidate_address": extracted.candidate_address,
+                "pincode_postal_code": extracted.pincode_postal_code,
                 "linkedin_url": extracted.linkedin_url,
                 "other_urls": extracted.other_urls,
                 "education": [e.model_dump() for e in extracted.education],

@@ -34,6 +34,8 @@ class ParsedProfile(models.Model):
     marital_status = models.CharField(max_length=20, blank=True, null=True)
     father_name = models.CharField(max_length=255, blank=True, null=True)
     mother_name = models.CharField(max_length=255, blank=True, null=True)
+    candidate_address = models.TextField(blank=True, null=True)
+    pincode_postal_code = models.CharField(max_length=20, blank=True, null=True)
     known_languages = models.JSONField(default=list, blank=True)
     linkedin_url = models.URLField(blank=True, null=True)
     other_urls = models.JSONField(default=list, blank=True)
