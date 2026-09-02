@@ -74,7 +74,7 @@ TEMPLATES = [
     },
 ]
 
-# ── Database ──────────────────────────────────────────────────────────────────
+# Database ──────────────────────────────────────────────────────────────────
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -275,6 +275,9 @@ GROQ_API_KEYS = [
     if k.startswith('GROQ_API_KEY_') and v
 ]
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-20b')
+
+# ── Duplicate-check API (skip LLM parsing if email/phone already exists in DB) ─
+DUPLICATE_CHECK_API_URL = os.environ.get('DUPLICATE_CHECK_API_URL', '')
 
 # ── BulkResume: OS-specific tool paths (Tesseract / Poppler / LibreOffice) ────
 if platform.system() == 'Windows':

@@ -129,8 +129,31 @@ class BatchStatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        total = resumes.count()
+        duplicate_count = resumes.filter(status='duplicate').count()
+        done_count = resumes.filter(status='done').count()
+        failed_count = resumes.filter(status='failed').count()
+        pending_count = resumes.filter(status__in=['pending', 'processing']).count()
+
+        # Of the ones marked 'done', how many actually hit the LLM vs.
+        # fell back to plain regex extraction (e.g. LLM call failed).
+        llm_parsed_count = resumes.filter(status='done', profile__extraction_method='llm').count()
+        regex_fallback_count = resumes.filter(status='done', profile__extraction_method='regex_fallback').count()
+
+        summary = {
+            "total": total,
+            "llm_parsed": llm_parsed_count,
+            "regex_fallback": regex_fallback_count,
+            "duplicate_skipped": duplicate_count,
+            "failed": failed_count,
+            "pending": pending_count,
+        }
+
         serializer = ResumeListSerializer(resumes, many=True)
-        return Response({"batch_id": batch_id, "resumes": serializer.data}, status=status.HTTP_200_OK)
+        return Response(
+            {"batch_id": batch_id, "summary": summary, "resumes": serializer.data},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ResumeDetailView(APIView):

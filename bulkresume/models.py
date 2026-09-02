@@ -7,6 +7,7 @@ class Resume(models.Model):
         ('processing', 'Processing'),
         ('done', 'Done'),
         ('failed', 'Failed'),
+        ('duplicate', 'Duplicate'),
     ]
 
     file = models.FileField(upload_to='bulkresume/resumes/%Y/%m/%d/')
@@ -17,6 +18,7 @@ class Resume(models.Model):
     batch_id = models.CharField(max_length=50, db_index=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     error_message = models.TextField(blank=True)
+    is_duplicate = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Resume#{self.id} [{self.status}]"
@@ -27,6 +29,12 @@ class ParsedProfile(models.Model):
     name = models.CharField(max_length=255, blank=True)
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=30, blank=True)
+    gender = models.CharField(max_length=20, blank=True)
+    date_of_birth = models.CharField(max_length=20, blank=True)
+    marital_status = models.CharField(max_length=20, blank=True)
+    father_name = models.CharField(max_length=255, blank=True)
+    mother_name = models.CharField(max_length=255, blank=True)
+    known_languages = models.JSONField(default=list, blank=True)
     linkedin_url = models.URLField(blank=True)
     other_urls = models.JSONField(default=list, blank=True)
     education = models.JSONField(default=list, blank=True)
