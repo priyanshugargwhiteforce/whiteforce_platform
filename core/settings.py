@@ -121,7 +121,6 @@ REST_FRAMEWORK = {
         'validate_tokens':     '15/minute',
         'send_wira': '30/minute',
         'bulk_resume_upload': '10/minute',
-        'single_resume_parse': '20/minute',
         
     },
     'DEFAULT_PARSER_CLASSES': [

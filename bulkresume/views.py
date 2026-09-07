@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import uuid
 
@@ -9,12 +8,10 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import ParsedProfile, Resume
+from .models import Resume
 from .serializers import ResumeDetailSerializer, ResumeListSerializer
-from .services.file_classifier import classify_file
-from .services.single_parse import build_profile_defaults, parse_single_resume
 from .tasks import process_resume_task
-from .throttles import BulkUploadThrottle, SingleResumeParseThrottle
+from .throttles import BulkUploadThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -109,102 +106,6 @@ class BulkResumeUploadView(APIView):
             {"batch_id": batch_id, "count": len(resume_ids), "resume_ids": resume_ids},
             status=status.HTTP_202_ACCEPTED,
         )
-
-
-class SingleResumeParseView(APIView):
-    """
-    Synchronous single-file parse-and-return endpoint.
-
-    Unlike BulkResumeUploadView (above), this:
-      - takes exactly ONE file under the 'file' field
-      - does NOT check the duplicate-candidate DB (no check_duplicate_in_db
-        call) — every upload gets parsed, every time
-      - does NOT queue a Celery task — parsing happens inline, and the full
-        extracted profile is returned in this same response
-      - still saves Resume + ParsedProfile rows (so it shows up in admin /
-        GET resume-detail like any other parse, and benefits from the same
-        parse_score / OCR deep-dive logic as the bulk pipeline)
-
-    BulkResumeUploadView, BatchStatusView, and the async Celery flow in
-    services/pipeline.py are completely unaffected by this endpoint.
-    """
-    authentication_classes = [ApiKeyAuthentication]
-    permission_classes = [AllowAny]
-    throttle_classes = [SingleResumeParseThrottle]
-    throttle_scope = 'single_resume_parse'
-
-    def post(self, request):
-        f = request.FILES.get('file')
-
-        if not f:
-            return Response(
-                {"error": "No file provided. Attach exactly one file under the 'file' field."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        ext = ('.' + f.name.rsplit('.', 1)[-1].lower()) if '.' in f.name else ''
-        if ext not in ALLOWED_EXTENSIONS:
-            return Response({"error": f"Unsupported file type '{ext}'"}, status=status.HTTP_400_BAD_REQUEST)
-        if f.size == 0:
-            return Response({"error": "File is empty"}, status=status.HTTP_400_BAD_REQUEST)
-        if f.size > MAX_FILE_SIZE_BYTES:
-            return Response(
-                {"error": f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB limit"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            resume = Resume.objects.create(file=f)
-        except ValidationError as e:
-            logger.warning("Validation error creating resume for single parse: %s", e)
-            return Response({"error": "Invalid file data", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception:
-            logger.exception("Failed to save uploaded file for single-resume parse")
-            return Response(
-                {"error": "Could not save uploaded file. Please try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        resume.status = 'processing'
-        resume.save(update_fields=['status'])
-
-        try:
-            file_path = resume.file.path
-
-            with open(file_path, 'rb') as fh:
-                resume.file_hash = hashlib.sha256(fh.read()).hexdigest()
-
-            file_type = classify_file(file_path)
-            resume.file_type = file_type
-
-            result = parse_single_resume(file_path, file_type, log_prefix=f"Resume#{resume.id} (single): ")
-
-            resume.raw_text = result["raw_text"]
-            resume.save(update_fields=['file_type', 'raw_text', 'file_hash'])
-
-            ParsedProfile.objects.update_or_create(
-                resume=resume,
-                defaults=build_profile_defaults(
-                    result["extracted"], result["needs_review"], result["extraction_method"],
-                    result["score"], result["ocr_deep_dive_used"],
-                ),
-            )
-
-            resume.status = 'done'
-            resume.save(update_fields=['status'])
-
-        except Exception as exc:
-            resume.status = 'failed'
-            resume.error_message = str(exc)
-            resume.save(update_fields=['status', 'error_message'])
-            logger.exception(f"Resume#{resume.id}: single-resume parse failed")
-            return Response(
-                {"error": "Failed to parse resume", "detail": str(exc), "resume_id": resume.id},
-                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
-
-        serializer = ResumeDetailSerializer(resume)
-        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class BatchStatusView(APIView):
