@@ -37,6 +37,8 @@ class ParsedProfile(models.Model):
     candidate_address = models.TextField(blank=True, null=True)
     pincode_postal_code = models.CharField(max_length=20, blank=True, null=True)
     known_languages = models.JSONField(default=list, blank=True)
+    hobbies = models.JSONField(default=list, blank=True, null=True)
+    training = models.JSONField(default=list, blank=True, null=True)
     linkedin_url = models.URLField(blank=True, null=True)
     other_urls = models.JSONField(default=list, blank=True)
     education = models.JSONField(default=list, blank=True)
@@ -47,6 +49,9 @@ class ParsedProfile(models.Model):
     summary = models.TextField(blank=True)
     needs_review = models.BooleanField(default=False)
     extraction_method = models.CharField(max_length=30, blank=True, null=True)
+    # ── Parse-quality scoring / OCR deep-dive ──────────────────────────
+    parse_score = models.FloatField(blank=True, null=True)
+    ocr_deep_dive_used = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

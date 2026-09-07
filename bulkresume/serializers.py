@@ -7,7 +7,7 @@ class ParsedProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = ParsedProfile
         fields = [
-            'name', 'email', 'phone', 'gender', 'date_of_birth', 'marital_status', 'father_name', 'mother_name', 'known_languages', 'candidate_address', 'pincode_postal_code', 'linkedin_url', 'other_urls',
+            'name', 'email', 'phone', 'gender', 'date_of_birth', 'marital_status', 'father_name', 'mother_name', 'known_languages', 'candidate_address', 'pincode_postal_code', 'hobbies', 'training', 'linkedin_url', 'other_urls',
             'education', 'experience', 'skills', 'certifications',
             'internships', 'summary', 'needs_review', 'extraction_method',
         ]

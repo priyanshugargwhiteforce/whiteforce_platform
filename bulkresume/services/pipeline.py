@@ -2,14 +2,23 @@ import hashlib
 import logging
 import re
 
+from django.conf import settings
+
 from ..models import ParsedProfile, Resume
+from .deep_dive_ocr import deep_dive_ocr_extract
 from .dedup_check import DedupCheckError, check_duplicate_in_db
 from .extractors import extract_text
 from .file_classifier import classify_file
 from .llm_extractor import extract_structured_data
+from .parse_score import compute_parse_score
 from .regex_fallback import regex_extract_basic_fields
 
 logger = logging.getLogger('bulkresume')
+
+# Score <= this triggers the OCR deep-dive retry. Override via
+# settings.OCR_DEEP_DIVE_SCORE_THRESHOLD if you want to tune it without
+# touching this file; defaults to 55 if that setting isn't set.
+OCR_DEEP_DIVE_SCORE_THRESHOLD = getattr(settings, 'OCR_DEEP_DIVE_SCORE_THRESHOLD', 55.0)
 
 
 def clean_resume_text(text: str) -> str:
@@ -70,6 +79,48 @@ def process_resume(resume_id: int) -> None:
         extracted, needs_review = extract_structured_data(raw_text)
         extraction_method = "regex_fallback" if needs_review else "llm"
 
+        score = compute_parse_score(extracted, raw_text)
+        ocr_deep_dive_used = False
+
+        # ── Deep-dive: only when the parse actually looks bad ──────────────
+        # Score <= threshold means either the LLM couldn't fill the key
+        # fields, or the source text itself looked garbled/sparse — both
+        # point at a bad text extraction, not a bad LLM call. Re-OCR with
+        # stronger preprocessing and re-parse; keep whichever attempt scored
+        # higher. Wrapped so a deep-dive failure never breaks the main flow —
+        # worst case we just keep the original (already-saved) result.
+        if score.needs_ocr_deep_dive(threshold=OCR_DEEP_DIVE_SCORE_THRESHOLD):
+            logger.info(
+                f"Resume#{resume.id}: parse score {score.total_score} <= "
+                f"{OCR_DEEP_DIVE_SCORE_THRESHOLD}, attempting OCR deep-dive"
+            )
+            try:
+                ocr_text = deep_dive_ocr_extract(file_path, file_type)
+                if ocr_text:
+                    ocr_text = clean_resume_text(ocr_text)
+                    ocr_extracted, ocr_needs_review = extract_structured_data(ocr_text)
+                    ocr_score = compute_parse_score(ocr_extracted, ocr_text)
+
+                    logger.info(
+                        f"Resume#{resume.id}: deep-dive score {ocr_score.total_score} "
+                        f"vs original {score.total_score}"
+                    )
+
+                    if ocr_score.total_score > score.total_score:
+                        extracted = ocr_extracted
+                        needs_review = ocr_needs_review
+                        extraction_method = "regex_fallback" if needs_review else "llm_ocr_deep_dive"
+                        raw_text = ocr_text
+                        score = ocr_score
+                        ocr_deep_dive_used = True
+                        resume.raw_text = raw_text
+                        resume.save(update_fields=['raw_text'])
+                else:
+                    logger.info(f"Resume#{resume.id}: deep-dive OCR produced no usable text, keeping original")
+            except Exception as exc:
+                # Never let a deep-dive failure take down an otherwise-successful parse.
+                logger.warning(f"Resume#{resume.id}: OCR deep-dive raised {exc!r}, keeping original result")
+
         ParsedProfile.objects.update_or_create(
             resume=resume,
             defaults={
@@ -84,6 +135,8 @@ def process_resume(resume_id: int) -> None:
                 "known_languages": extracted.known_languages,
                 "candidate_address": extracted.candidate_address,
                 "pincode_postal_code": extracted.pincode_postal_code,
+                "hobbies": extracted.hobbies,
+                "training": extracted.training,
                 "linkedin_url": extracted.linkedin_url,
                 "other_urls": extracted.other_urls,
                 "education": [e.model_dump() for e in extracted.education],
@@ -94,6 +147,8 @@ def process_resume(resume_id: int) -> None:
                 "summary": extracted.profile_summary,
                 "needs_review": needs_review,
                 "extraction_method": extraction_method,
+                "parse_score": score.total_score,
+                "ocr_deep_dive_used": ocr_deep_dive_used,
             },
         )
 
