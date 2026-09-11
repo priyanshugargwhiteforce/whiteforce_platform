@@ -7,3 +7,7 @@ class BulkUploadThrottle(_LoggedThrottle):
 
 class SingleResumeParseThrottle(_LoggedThrottle):
     scope = 'single_resume_parse'
+
+
+class JDMatchThrottle(_LoggedThrottle):
+    scope = 'jd_resume_match'

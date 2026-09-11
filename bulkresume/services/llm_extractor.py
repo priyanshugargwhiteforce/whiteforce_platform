@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .regex_fallback import regex_extract_basic_fields
-from .schemas import ResumeExtraction
+from .schemas import JobDescriptionExtraction, ResumeExtraction, ResumeJDMatchResult
 
 logger = logging.getLogger('bulkresume')
 
@@ -200,3 +200,170 @@ def extract_structured_data(resume_text: str) -> tuple[ResumeExtraction, bool]:
         logger.warning(traceback.format_exc())
         fallback_data = regex_extract_basic_fields(resume_text)
         return ResumeExtraction(**fallback_data), True
+
+
+# ── JD extraction (new) ─────────────────────────────────────────────────────
+# Separate prompt/schema/call function rather than reusing _call_groq's resume
+# prompt — same reasoning single_parse.py used for not touching pipeline.py's
+# tested update_or_create call: keep the already-working resume-extraction
+# path completely untouched. Shares the client pool / rate-limit / retry
+# infra above (_get_next_client, _record_usage, MIN_SECONDS_BETWEEN_CALLS).
+
+JD_JSON_SCHEMA = JobDescriptionExtraction.model_json_schema()
+
+JD_EXTRACTION_PROMPT = """You are a job-description parsing engine. Extract structured information from the job description text below and return valid JSON with these fields:
+job_title, must_have_skills, good_to_have_skills, min_experience_years, max_experience_years, qualifications, responsibilities, location, employment_type, other_requirements.
+
+Rules:
+- Include every field above, even if empty ("" or []). Never omit a field.
+- must_have_skills: skills/technologies explicitly stated as required/mandatory. Keep each as a short keyword/phrase (e.g., "React", "5 years Python").
+- good_to_have_skills: skills explicitly called out as preferred/nice-to-have/bonus. If the JD doesn't distinguish must-have from nice-to-have, put all listed skills under must_have_skills and leave this empty.
+- min_experience_years / max_experience_years: plain numbers as strings (e.g. "3", "5"). Leave "" if not mentioned or if it's a range with no upper bound.
+- qualifications: required education/certifications (e.g. "B.Tech in Computer Science", "PMP certification").
+- responsibilities: key day-to-day duties, as short bullet-style phrases.
+- other_requirements: anything else explicitly required (e.g. "willing to relocate", "night shift").
+Job description text:
+---
+{jd_text}
+---
+"""
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+def _call_groq_jd(jd_text: str, model: str) -> dict:
+    time.sleep(MIN_SECONDS_BETWEEN_CALLS)
+
+    client, key_idx = _get_next_client()
+
+    try:
+        raw_response = client.chat.completions.with_raw_response.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You extract structured job-description data as valid JSON."},
+                {"role": "user", "content": JD_EXTRACTION_PROMPT.format(jd_text=jd_text[:6000])},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "jd_extraction",
+                    "schema": JD_JSON_SCHEMA,
+                    "strict": False,
+                },
+            },
+            temperature=0.1,
+        )
+        response = raw_response.parse()
+        _record_usage(key_idx, getattr(response, "usage", None))
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        status_code = getattr(e, 'status_code', None)
+        response_body = getattr(e, 'body', None) or getattr(e, 'message', None)
+        logger.warning(
+            f"Groq JD-extraction call failed on key index {key_idx} | "
+            f"type={type(e).__name__} | status={status_code} | detail={response_body or e}"
+        )
+        raise
+
+
+def extract_jd_structured(jd_text: str) -> tuple[JobDescriptionExtraction, bool]:
+    """Returns (structured_jd, needs_review). needs_review=True means the LLM
+    call failed and every field came back empty — callers should flag the
+    batch, since matching every resume against a blank JD is meaningless."""
+    model = settings.GROQ_MODEL
+    try:
+        raw_json = _call_groq_jd(jd_text, model)
+        validated = JobDescriptionExtraction(**raw_json)
+        return validated, False
+    except (ValidationError, Exception) as exc:
+        logger.warning(f"Groq JD extraction failed: {exc}")
+        logger.warning(traceback.format_exc())
+        return JobDescriptionExtraction(), True
+
+
+# ── Resume <-> JD matching (new) ────────────────────────────────────────────
+
+MATCH_JSON_SCHEMA = ResumeJDMatchResult.model_json_schema()
+
+MATCH_PROMPT = """You are an expert technical recruiter. Compare the CANDIDATE profile against the JOB DESCRIPTION below, field by field, and return valid JSON scoring how well the candidate matches.
+
+Rules:
+- overall_match_percent: a single 0-100 score for how well this candidate matches the JD overall. Weigh must-have skills and required experience heavily; weigh good-to-have skills and qualifications lightly.
+- matched_skills / missing_skills: compare candidate skills + experience descriptions against must_have_skills and good_to_have_skills. A skill counts as matched if it's present, a clear synonym (e.g. "ReactJS" matches "React"), or reasonably implied by the candidate's experience descriptions — not only exact string matches. List every JD skill under either matched_skills or missing_skills, never both, never omitted.
+- matched_qualifications / missing_qualifications: same idea for the JD's qualifications list.
+- experience_match: one short sentence comparing the candidate's total relevant experience against min_experience_years/max_experience_years (e.g. "Meets requirement: 5 years vs 3+ required").
+- field_breakdown: one entry per JD requirement (skills, qualifications, experience, location if specified) with field, jd_requirement, candidate_value (what the candidate actually has, or "" if nothing), matched (true/false), match_percent (0-100 for that one line item), and a one-sentence note.
+- strengths_summary: 2-3 sentences on what the candidate matches well.
+- gaps_summary: 2-3 sentences on what's missing or weak. If nothing is missing, say so plainly.
+- recommendation: one of "Strong Match", "Partial Match", or "Weak Match".
+- Do not invent candidate details that aren't present in the candidate profile below. Missing/unclear information should count against the match, not be assumed favorably.
+
+Job Description (structured JSON):
+---
+{jd_json}
+---
+Candidate Profile (structured JSON):
+---
+{candidate_json}
+---
+"""
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+def _call_groq_match(jd_json: str, candidate_json: str, model: str) -> dict:
+    time.sleep(MIN_SECONDS_BETWEEN_CALLS)
+
+    client, key_idx = _get_next_client()
+
+    try:
+        raw_response = client.chat.completions.with_raw_response.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a precise technical recruiter that compares candidates to job "
+                               "descriptions and returns valid JSON. Never omit a required field.",
+                },
+                {
+                    "role": "user",
+                    "content": MATCH_PROMPT.format(
+                        jd_json=jd_json[:6000], candidate_json=candidate_json[:6000]
+                    ),
+                },
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "resume_jd_match",
+                    "schema": MATCH_JSON_SCHEMA,
+                    "strict": False,
+                },
+            },
+            temperature=0.1,
+        )
+        response = raw_response.parse()
+        _record_usage(key_idx, getattr(response, "usage", None))
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        status_code = getattr(e, 'status_code', None)
+        response_body = getattr(e, 'body', None) or getattr(e, 'message', None)
+        logger.warning(
+            f"Groq match call failed on key index {key_idx} | "
+            f"type={type(e).__name__} | status={status_code} | detail={response_body or e}"
+        )
+        raise
+
+
+def match_resume_to_jd(jd_data: dict, candidate_data: dict) -> tuple[ResumeJDMatchResult, bool]:
+    """Returns (match_result, needs_review). On LLM failure, needs_review=True
+    and the caller (services/matcher.py) falls back to the deterministic
+    skill-overlap matcher so a Groq outage degrades match quality instead of
+    breaking the endpoint outright."""
+    model = settings.GROQ_MODEL
+    try:
+        raw_json = _call_groq_match(json.dumps(jd_data), json.dumps(candidate_data), model)
+        validated = ResumeJDMatchResult(**raw_json)
+        return validated, False
+    except (ValidationError, Exception) as exc:
+        logger.warning(f"Groq resume-JD match failed: {exc}")
+        logger.warning(traceback.format_exc())
+        return ResumeJDMatchResult(), True

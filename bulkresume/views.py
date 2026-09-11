@@ -9,12 +9,23 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import ParsedProfile, Resume
-from .serializers import ResumeDetailSerializer, ResumeListSerializer
+from .models import JobDescription, ParsedProfile, Resume, ResumeMatch
+from .serializers import (
+    JobDescriptionSerializer,
+    ResumeDetailSerializer,
+    ResumeListSerializer,
+    ResumeMatchSerializer,
+)
 from .services.file_classifier import classify_file
+from .services.jd_extractor import (
+    JDExtractionError,
+    extract_jd_from_file,
+    extract_jd_from_json,
+    extract_jd_from_text,
+)
 from .services.single_parse import build_profile_defaults, parse_single_resume
-from .tasks import process_resume_task
-from .throttles import BulkUploadThrottle, SingleResumeParseThrottle
+from .tasks import match_resume_task, process_resume_task
+from .throttles import BulkUploadThrottle, JDMatchThrottle, SingleResumeParseThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +33,11 @@ logger = logging.getLogger(__name__)
 MAX_FILES_PER_BATCH = 50
 ALLOWED_EXTENSIONS = {'.pdf', '.doc', '.docx'}
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# Resume<->JD matching does 1-2 LLM calls per resume (parse, if not already
+# in the DB, + match), so keep the per-request batch smaller than the plain
+# bulk-upload one above. Bump if/when Groq capacity allows.
+MAX_MATCH_RESUMES = 10
 
 
 class BulkResumeUploadView(APIView):
@@ -290,3 +306,242 @@ class ResumeDetailView(APIView):
 
         serializer = ResumeDetailSerializer(resume)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ── JD <-> Resume matching (new) ────────────────────────────────────────────
+
+class JDResumeMatchView(APIView):
+    """
+    POST /api/resumes/match/
+
+    Body (multipart/form-data):
+      resumes  : 1-10 resume files, repeated under the 'resumes' field
+      jd_file  : the JD as a file (pdf/doc/docx)   -- OR --
+      jd_text  : the JD as plain pasted text        -- OR --
+      jd_json  : the JD as a JSON string — either already shaped like
+                 JobDescriptionExtraction (job_title, must_have_skills, ...)
+                 or a free-form blob (e.g. {"description": "..."})
+
+    Exactly one of jd_file / jd_text / jd_json must be provided.
+
+    Async, same shape as BulkResumeUploadView: creates the JobDescription +
+    Resume + ResumeMatch rows, queues one Celery task per resume (phone
+    regex -> DB profile lookup or fresh parse -> JD match), and returns a
+    batch_id immediately. Poll JDMatchBatchStatusView for per-resume results
+    plus the batch-wide summary.
+    """
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [AllowAny]
+    throttle_classes = [JDMatchThrottle]
+    throttle_scope = 'jd_resume_match'
+
+    def post(self, request):
+        files = request.FILES.getlist('resumes')
+        jd_file = request.FILES.get('jd_file')
+        jd_text = request.data.get('jd_text')
+        jd_json = request.data.get('jd_json')
+
+        provided = [v for v in (jd_file, jd_text, jd_json) if v]
+        if len(provided) != 1:
+            return Response(
+                {"error": "Provide exactly one of: jd_file, jd_text, jd_json."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not files:
+            return Response(
+                {"error": "No resumes provided. Attach 1-10 files under the 'resumes' field."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(files) > MAX_MATCH_RESUMES:
+            return Response(
+                {"error": f"Too many resumes in one request. Max allowed is {MAX_MATCH_RESUMES}, got {len(files)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        invalid_files = []
+        for f in files:
+            ext = ('.' + f.name.rsplit('.', 1)[-1].lower()) if '.' in f.name else ''
+            if ext not in ALLOWED_EXTENSIONS:
+                invalid_files.append({"file": f.name, "reason": f"Unsupported file type '{ext}'"})
+            elif f.size == 0:
+                invalid_files.append({"file": f.name, "reason": "File is empty"})
+            elif f.size > MAX_FILE_SIZE_BYTES:
+                invalid_files.append({"file": f.name, "reason": f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB limit"})
+        if invalid_files:
+            return Response(
+                {"error": "One or more resume files failed validation", "details": invalid_files},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        batch_id = str(uuid.uuid4())
+
+        # ── Build the JD row first — if JD extraction itself fails, don't
+        # create any Resume/ResumeMatch rows at all. ───────────────────────
+        try:
+            if jd_file:
+                ext = ('.' + jd_file.name.rsplit('.', 1)[-1].lower()) if '.' in jd_file.name else ''
+                if ext not in ALLOWED_EXTENSIONS:
+                    return Response({"error": f"Unsupported JD file type '{ext}'"}, status=status.HTTP_400_BAD_REQUEST)
+                jd_row = JobDescription.objects.create(batch_id=batch_id, source_format='file', file=jd_file)
+                raw_text, parsed = extract_jd_from_file(jd_row.file.path)
+                jd_row.raw_text = raw_text
+                jd_row.parsed = parsed
+                jd_row.save(update_fields=['raw_text', 'parsed'])
+            elif jd_text:
+                raw_text, parsed = extract_jd_from_text(jd_text)
+                jd_row = JobDescription.objects.create(
+                    batch_id=batch_id, source_format='text', raw_text=raw_text, parsed=parsed,
+                )
+            else:  # jd_json
+                raw_text, parsed = extract_jd_from_json(jd_json)
+                jd_row = JobDescription.objects.create(
+                    batch_id=batch_id, source_format='json', raw_text=raw_text, parsed=parsed,
+                )
+        except JDExtractionError as e:
+            return Response({"error": f"Invalid jd_json: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(f"Failed to extract JD for batch {batch_id}")
+            return Response(
+                {"error": "Could not process the job description. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not any(jd_row.parsed.get(k) for k in
+                    ('must_have_skills', 'good_to_have_skills', 'qualifications', 'responsibilities', 'job_title')):
+            logger.warning(f"JD#{jd_row.id} (batch {batch_id}): structured extraction came back essentially empty")
+
+        # ── Resume + ResumeMatch rows ──────────────────────────────────────
+        match_ids = []
+        try:
+            for f in files:
+                resume = Resume.objects.create(file=f, batch_id=batch_id)
+                match = ResumeMatch.objects.create(jd=jd_row, resume=resume, status='pending')
+                match_ids.append(match.id)
+        except ValidationError as e:
+            logger.warning(f"Validation error creating match resumes for batch {batch_id}: {e}")
+            return Response({"error": "Invalid file data", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(f"Failed to create Resume/ResumeMatch records for batch {batch_id}")
+            return Response(
+                {"error": "Could not save uploaded files. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        queue_failures = []
+        for match_id in match_ids:
+            try:
+                match_resume_task.delay(match_id)
+            except Exception:
+                logger.exception(f"Failed to queue match task {match_id} (batch {batch_id})")
+                queue_failures.append(match_id)
+
+        response_data = {
+            "batch_id": batch_id,
+            "jd_id": jd_row.id,
+            "jd_preview": jd_row.parsed,
+            "count": len(match_ids),
+        }
+        if queue_failures:
+            response_data["warning"] = "Some resumes were saved but could not be queued for matching"
+            response_data["failed_to_queue"] = queue_failures
+            return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
+
+        return Response(response_data, status=status.HTTP_202_ACCEPTED)
+
+
+class JDMatchBatchStatusView(APIView):
+    """
+    GET /api/resumes/match/<batch_id>/status/
+
+    Same polling shape as BatchStatusView, but for the JD-matching batch:
+    per-resume match results (sorted best-match-first) plus a batch-wide
+    summary — average/highest/lowest match percent, how many candidates
+    came from the DB vs. a fresh parse, and a per-requirement rollup
+    showing what fraction of candidates in this batch matched each
+    must-have / good-to-have skill on the JD.
+    """
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request, batch_id):
+        try:
+            uuid.UUID(str(batch_id))
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid batch_id format"}, status=status.HTTP_400_BAD_REQUEST)
+
+        matches = ResumeMatch.objects.filter(resume__batch_id=batch_id).select_related('resume', 'jd')
+        if not matches.exists():
+            return Response(
+                {"error": f"No matches found for batch_id '{batch_id}'"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        jd_row = matches.first().jd
+        total = matches.count()
+        done = matches.filter(status='done')
+        done_count = done.count()
+        failed_count = matches.filter(status='failed').count()
+        pending_count = matches.filter(status__in=['pending', 'processing']).count()
+        db_profile_count = done.filter(source='db_profile').count()
+        parsed_count = done.filter(source='parsed').count()
+
+        scores = list(done.filter(match_percent__isnull=False).values_list('match_percent', flat=True))
+        average_match_percent = round(sum(scores) / len(scores), 2) if scores else None
+        highest_match_percent = max(scores) if scores else None
+        lowest_match_percent = min(scores) if scores else None
+
+        summary = {
+            "total": total,
+            "done": done_count,
+            "failed": failed_count,
+            "pending": pending_count,
+            "from_db_profile": db_profile_count,
+            "freshly_parsed": parsed_count,
+            "average_match_percent": average_match_percent,
+            "highest_match_percent": highest_match_percent,
+            "lowest_match_percent": lowest_match_percent,
+            "requirement_rollup": _build_requirement_rollup(jd_row.parsed, done),
+        }
+
+        serializer = ResumeMatchSerializer(matches.order_by('-match_percent'), many=True)
+        return Response(
+            {
+                "batch_id": batch_id,
+                "job_description": JobDescriptionSerializer(jd_row).data,
+                "summary": summary,
+                "matches": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _build_requirement_rollup(jd_parsed: dict, done_matches) -> list:
+    """For each must-have / good-to-have skill on the JD, what fraction of
+    the (done) candidates in this batch matched it — e.g. "AWS" matched by
+    6/10 candidates. Lets a recruiter see at a glance which requirements
+    are the real bottleneck across the whole batch, not just per-resume."""
+    all_reqs = (
+        [(s, "must_have") for s in jd_parsed.get("must_have_skills", [])]
+        + [(s, "good_to_have") for s in jd_parsed.get("good_to_have_skills", [])]
+    )
+    if not all_reqs:
+        return []
+
+    done_list = list(done_matches)
+    total_done = len(done_list)
+    rollup = []
+    for skill, kind in all_reqs:
+        skill_lower = skill.strip().lower()
+        matched_count = sum(
+            1 for m in done_list
+            if any(skill_lower in s.lower() or s.lower() in skill_lower for s in (m.matched_skills or []))
+        )
+        rollup.append({
+            "requirement": skill,
+            "type": kind,
+            "matched_by": matched_count,
+            "total_candidates": total_done,
+            "match_rate_percent": round(matched_count / total_done * 100, 1) if total_done else 0,
+        })
+    return rollup

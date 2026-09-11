@@ -122,6 +122,7 @@ REST_FRAMEWORK = {
         'send_wira': '30/minute',
         'bulk_resume_upload': '10/minute',
         'single_resume_parse': '20/minute',
+        'jd_resume_match': '5/minute',
         
     },
     'DEFAULT_PARSER_CLASSES': [
@@ -241,6 +242,7 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ROUTES = {
     'bulkresume.tasks.process_resume_task': {'queue': 'resume_parsing'},
+    'bulkresume.tasks.match_resume_task': {'queue': 'resume_parsing'},
 }
 
 # ── Celery resilience (WSL mirrored networking connection-drop mitigation) ────
