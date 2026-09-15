@@ -304,3 +304,12 @@ EMAIL_VALIDATOR = {
     'MAX_WORKERS':      50,
     'BATCH_MAX_EMAILS': 500,
 }
+
+CELERY_BEAT_SCHEDULE = {
+    'dispatch-pending-resumes': {
+        'task': 'bulkresume.tasks.dispatch_pending_resumes',
+        'schedule': 30.0,  # every 30 seconds — fine for local testing
+    },
+}
+
+DATA_UPLOAD_MAX_NUMBER_FILES = 2000

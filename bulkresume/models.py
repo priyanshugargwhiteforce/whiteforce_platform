@@ -4,6 +4,7 @@ from django.db import models
 class Resume(models.Model):
     STATUS_CHOICES = [
         ('pending', 'Pending'),
+        ('queued', 'Queued'),
         ('processing', 'Processing'),
         ('done', 'Done'),
         ('failed', 'Failed'),

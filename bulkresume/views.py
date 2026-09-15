@@ -24,13 +24,17 @@ from .services.jd_extractor import (
     extract_jd_from_text,
 )
 from .services.single_parse import build_profile_defaults, parse_single_resume
-from .tasks import match_resume_task, process_resume_task
+from .tasks import match_resume_task
 from .throttles import BulkUploadThrottle, JDMatchThrottle, SingleResumeParseThrottle
 
 logger = logging.getLogger(__name__)
 
 # Tune these to your actual constraints
-MAX_FILES_PER_BATCH = 50
+# Upload can now accept a large batch (e.g. ~1500) in one call — nothing
+# gets dispatched to Celery immediately anymore (see below), so this cap
+# just guards against a single request being unreasonably large, not
+# against Groq/worker load.
+MAX_FILES_PER_BATCH = 2000
 ALLOWED_EXTENSIONS = {'.pdf', '.doc', '.docx'}
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
@@ -99,30 +103,24 @@ class BulkResumeUploadView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # DB rows exist at this point — queueing failures shouldn't look like
-        # total failure to the client, since the resumes were saved.
-        queue_failures = []
-        for resume_id in resume_ids:
-            try:
-                process_resume_task.delay(resume_id)
-            except Exception:
-                logger.exception("Failed to queue processing task for resume %s (batch %s)", resume_id, batch_id)
-                queue_failures.append(resume_id)
-
-        if queue_failures:
-            return Response(
-                {
-                    "batch_id": batch_id,
-                    "count": len(resume_ids),
-                    "resume_ids": resume_ids,
-                    "warning": "Some resumes were saved but could not be queued for processing",
-                    "failed_to_queue": queue_failures,
-                },
-                status=status.HTTP_207_MULTI_STATUS,
-            )
-
+        # No Celery dispatch here anymore. All `resume_ids` sit as
+        # status='pending'. management/commands/process_pending_resumes.py
+        # (run on a cron schedule) is what claims pending resumes and
+        # dispatches process_resume_task for them, MAX_CONCURRENT_RESUME_PARSES
+        # at a time system-wide — regardless of whether this batch is 5
+        # resumes or 1500. This keeps a single huge upload from flooding
+        # Celery/Groq the instant it lands.
         return Response(
-            {"batch_id": batch_id, "count": len(resume_ids), "resume_ids": resume_ids},
+            {
+                "batch_id": batch_id,
+                "count": len(resume_ids),
+                "resume_ids": resume_ids,
+                "status": "queued",
+                "message": (
+                    f"{len(resume_ids)} resume(s) queued. They'll be parsed in the background "
+                    "(a limited number at a time) — poll the batch-status endpoint to watch progress."
+                ),
+            },
             status=status.HTTP_202_ACCEPTED,
         )
 
@@ -248,7 +246,7 @@ class BatchStatusView(APIView):
         duplicate_count = resumes.filter(status='duplicate').count()
         done_count = resumes.filter(status='done').count()
         failed_count = resumes.filter(status='failed').count()
-        pending_count = resumes.filter(status__in=['pending', 'processing']).count()
+        pending_count = resumes.filter(status__in=['pending', 'queued', 'processing']).count()
 
         # Of the ones marked 'done', how many actually hit the LLM vs.
         # fell back to plain regex extraction (e.g. LLM call failed).
@@ -257,7 +255,7 @@ class BatchStatusView(APIView):
         ocr_deep_dive_count = resumes.filter(status='done', profile__ocr_deep_dive_used=True).count()
 
         # Average parse_score across resumes that actually have one (i.e.
-        # status='done' — pending/processing/failed/duplicate have no
+        # status='done' — pending/queued/processing/failed/duplicate have no
         # ParsedProfile row yet, so they're naturally excluded here).
         scores = list(
             resumes.filter(status='done', profile__parse_score__isnull=False)
@@ -308,7 +306,7 @@ class ResumeDetailView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-# ── JD <-> Resume matching (new) ────────────────────────────────────────────
+# ── JD <-> Resume matching ───────────────────────────────────────────────────
 
 class JDResumeMatchView(APIView):
     """
@@ -325,10 +323,10 @@ class JDResumeMatchView(APIView):
     Exactly one of jd_file / jd_text / jd_json must be provided.
 
     Async, same shape as BulkResumeUploadView: creates the JobDescription +
-    Resume + ResumeMatch rows, queues one Celery task per resume (phone
-    regex -> DB profile lookup or fresh parse -> JD match), and returns a
-    batch_id immediately. Poll JDMatchBatchStatusView for per-resume results
-    plus the batch-wide summary.
+    Resume + ResumeMatch rows, queues one Celery task per resume (full
+    resume parse, then JD match), and returns a batch_id immediately. Poll
+    JDMatchBatchStatusView for per-resume results plus the batch-wide
+    summary.
     """
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [AllowAny]
