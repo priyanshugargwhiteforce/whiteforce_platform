@@ -110,7 +110,7 @@ def build_profile_defaults(extracted, needs_review: bool, extraction_method: str
         "candidate_address": extracted.candidate_address,
         "pincode_postal_code": extracted.pincode_postal_code,
         "hobbies": extracted.hobbies,
-        "training": extracted.training,
+        "training":[t.model_dump() for t in extracted.training],
         "linkedin_url": extracted.linkedin_url,
         "other_urls": extracted.other_urls,
         "education": [e.model_dump() for e in extracted.education],

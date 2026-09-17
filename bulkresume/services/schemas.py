@@ -20,6 +20,26 @@ class Experience(BaseModel):
     description: str = ""
 
 
+class Training(BaseModel):
+    """
+    Was previously List[str] on ResumeExtraction below, but the prompt
+    (EXTRACTION_PROMPT in llm_extractor.py) has always asked the model for
+    "name, provider/institution, and year if available" -- a structured
+    shape, same as Education/Experience. The schema just never matched
+    that instruction, so any resume where the model correctly followed the
+    prompt and returned training as objects (not bare strings) failed
+    Pydantic validation entirely, discarding the WHOLE extraction (name,
+    skills, education, everything) and falling back to bare regex --
+    correct fallback behavior, but an unnecessary quality loss triggered
+    by one unrelated field.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = ""
+    provider: str = ""
+    year: str = ""
+
+
 class ResumeExtraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -35,7 +55,7 @@ class ResumeExtraction(BaseModel):
     candidate_address: str = ""
     pincode_postal_code: str = ""
     hobbies: List[str] = Field(default_factory=list)
-    training: List[str] = Field(default_factory=list)
+    training: List[Training] = Field(default_factory=list)
     linkedin_url: str = ""
     other_urls: List[str] = Field(default_factory=list)
     education: List[Education] = Field(default_factory=list)
@@ -46,7 +66,7 @@ class ResumeExtraction(BaseModel):
     profile_summary: str = ""
 
 
-# ── JD <-> Resume matching (new) ────────────────────────────────────────────
+# ── JD <-> Resume matching ───────────────────────────────────────────────────
 
 class JobDescriptionExtraction(BaseModel):
     """Structured shape a JD (file / pasted text / loosely-shaped JSON) gets
