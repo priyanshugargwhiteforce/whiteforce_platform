@@ -80,10 +80,31 @@ def claim_and_dispatch_pending_resumes() -> str:
         if claimed_ids:
             Resume.objects.filter(id__in=claimed_ids).update(status='queued')
 
+    # If .delay() fails for a specific resume (broker hiccup, brief
+    # connection issue during a restart), that resume must NOT stay stuck
+    # at 'queued' forever with no task ever actually published for it --
+    # revert it to 'pending' so the NEXT Beat tick claims and retries it,
+    # instead of it silently vanishing into a permanent limbo state. This
+    # is exactly what happened without this guard: resumes stuck at
+    # 'queued', eating into MAX_CONCURRENT_RESUME_PARSES forever, with no
+    # process_resume_task ever received for them.
+    dispatch_failures = []
     for resume_id in claimed_ids:
-        process_resume_task.delay(resume_id)
+        try:
+            process_resume_task.delay(resume_id)
+        except Exception:
+            logger.exception(f"Failed to dispatch process_resume_task for resume#{resume_id}, reverting to pending")
+            dispatch_failures.append(resume_id)
 
-    msg = f"Claimed and queued {len(claimed_ids)} resume(s) ({in_flight} already in flight, {slots} slot(s) available)."
+    if dispatch_failures:
+        Resume.objects.filter(id__in=dispatch_failures).update(status='pending')
+
+    dispatched_count = len(claimed_ids) - len(dispatch_failures)
+    msg = (
+        f"Claimed {len(claimed_ids)} resume(s), dispatched {dispatched_count} "
+        f"({len(dispatch_failures)} failed to dispatch and were reverted to pending) "
+        f"({in_flight} already in flight, {slots} slot(s) were available)."
+    )
     logger.info(msg)
     return msg
 

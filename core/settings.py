@@ -269,7 +269,10 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 }
 
 # Worker-level: agar connection lost ho, currently running task cancel na ho
-worker_cancel_long_running_tasks_on_connection_loss = False
+# (renamed from the old bare lowercase `worker_cancel_long_running_tasks_on_connection_loss`
+# -- that key has no CELERY_ prefix, so with namespace='CELERY' in celery.py
+# it was very likely never actually being read by Celery at all)
+CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS = False
 
 # ── Celery reliability additions ──────────────────────────────────────────
 # If a worker process gets killed mid-task (e.g. hits MemoryMax, OOM,
@@ -288,9 +291,13 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # Hard ceiling per task -- if something (LLM call, OCR, soffice conversion)
 # hangs past this despite the timeouts already added at each individual
 # step, the task gets killed outright rather than blocking a worker slot
-# indefinitely.
-CELERY_TASK_TIME_LIMIT = 300        # hard kill after 5 minutes
-CELERY_TASK_SOFT_TIME_LIMIT = 240   # SoftTimeLimitExceeded raised at 4 minutes
+# indefinitely. Raised from the original 300s/240s: worst case for one
+# resume needing deep-dive + a .doc/.docx conversion realistically adds up
+# to ~450-475s (multi-page Tesseract passes + soffice conversion + two LLM
+# calls), so 300s risked hard-killing legitimately slow (not stuck)
+# resumes before they could finish.
+CELERY_TASK_TIME_LIMIT = 600        # hard kill after 10 minutes
+CELERY_TASK_SOFT_TIME_LIMIT = 540   # SoftTimeLimitExceeded raised at 9 minutes
 
 # ── Groq — multiple keys (temporary, until company upgrades to paid tier) ────
 # settings.py mein
@@ -333,4 +340,4 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-DATA_UPLOAD_MAX_NUMBER_FILES = 2000
+DATA_UPLOAD_MAX_NUMBER_FILES = 1500
