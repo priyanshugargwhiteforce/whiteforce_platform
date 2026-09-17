@@ -21,6 +21,17 @@ class Resume(models.Model):
     error_message = models.TextField(blank=True)
     is_duplicate = models.BooleanField(default=False)
 
+    # ── Deep-dive OCR result cache ──────────────────────────────────────
+    # Set the FIRST time deep-dive OCR actually runs for this resume.
+    # Prevents a Celery retry (triggered by a failure AFTER OCR completes --
+    # e.g. a transient DB write error on ParsedProfile save) from silently
+    # re-running the entire OCR pass (PDF render + deskew + denoise +
+    # Tesseract) from scratch. On retry, process_resume() checks this flag
+    # and reuses ocr_deep_dive_text instead of calling deep_dive_ocr_extract
+    # again.
+    ocr_deep_dive_attempted = models.BooleanField(default=False)
+    ocr_deep_dive_text = models.TextField(blank=True)
+
     def __str__(self):
         return f"Resume#{self.id} [{self.status}]"
 

@@ -95,7 +95,23 @@ def process_resume(resume_id: int) -> None:
                 f"{OCR_DEEP_DIVE_SCORE_THRESHOLD}, attempting OCR deep-dive"
             )
             try:
-                ocr_text = deep_dive_ocr_extract(file_path, file_type)
+                if resume.ocr_deep_dive_attempted:
+                    # A previous attempt at this SAME resume_id already ran
+                    # the actual OCR pass (PDF render + deskew + denoise +
+                    # Tesseract) — most likely because this task is being
+                    # retried after failing at a LATER step (e.g. the
+                    # ParsedProfile DB write below, on a transient DB
+                    # hiccup). Reuse the cached result instead of paying
+                    # the full OCR cost again. This is what stops a Celery
+                    # retry from silently multiplying OCR work per resume.
+                    ocr_text = resume.ocr_deep_dive_text
+                    logger.info(f"Resume#{resume.id}: reusing cached deep-dive OCR text from a previous attempt")
+                else:
+                    ocr_text = deep_dive_ocr_extract(file_path, file_type)
+                    resume.ocr_deep_dive_attempted = True
+                    resume.ocr_deep_dive_text = ocr_text or ""
+                    resume.save(update_fields=['ocr_deep_dive_attempted', 'ocr_deep_dive_text'])
+
                 if ocr_text:
                     ocr_text = clean_resume_text(ocr_text)
                     ocr_extracted, ocr_needs_review = extract_structured_data(ocr_text)

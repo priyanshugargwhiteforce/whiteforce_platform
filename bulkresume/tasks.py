@@ -15,7 +15,15 @@ logger = logging.getLogger('bulkresume')
 MAX_CONCURRENT_RESUME_PARSES = getattr(settings, 'MAX_CONCURRENT_RESUME_PARSES', 20)
 
 
-@shared_task(bind=True, max_retries=2, default_retry_delay=10)
+@shared_task(
+    bind=True,
+    max_retries=2,
+    retry_backoff=True,       # 1st retry ~2s, 2nd ~4s, instead of a flat 10s every time
+    retry_backoff_max=60,     # cap the backoff so it never waits absurdly long
+    retry_jitter=True,        # randomizes the backoff slightly, so N resumes that all
+                               # hit a Groq rate-limit in the same second don't all
+                               # retry at the exact same instant again (thundering herd)
+)
 def process_resume_task(self, resume_id: int):
     try:
         process_resume(resume_id)
@@ -25,7 +33,13 @@ def process_resume_task(self, resume_id: int):
         raise self.retry(exc=exc)
 
 
-@shared_task(bind=True, max_retries=2, default_retry_delay=10)
+@shared_task(
+    bind=True,
+    max_retries=2,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def match_resume_task(self, resume_match_id: int):
     try:
         process_resume_match(resume_match_id)

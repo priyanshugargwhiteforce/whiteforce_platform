@@ -271,6 +271,27 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 # Worker-level: agar connection lost ho, currently running task cancel na ho
 worker_cancel_long_running_tasks_on_connection_loss = False
 
+# ── Celery reliability additions ──────────────────────────────────────────
+# If a worker process gets killed mid-task (e.g. hits MemoryMax, OOM,
+# server restart), the task is put back on the queue for another worker
+# to pick up, instead of silently vanishing and leaving the resume stuck
+# in 'processing'/'queued' forever.
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+
+# Each worker process only reserves 1 task at a time instead of the
+# default 4 -- important here because deep-dive OCR tasks can take far
+# longer than plain-text-parse tasks, so a process shouldn't hoard several
+# long tasks in its local buffer while another process sits idle.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# Hard ceiling per task -- if something (LLM call, OCR, soffice conversion)
+# hangs past this despite the timeouts already added at each individual
+# step, the task gets killed outright rather than blocking a worker slot
+# indefinitely.
+CELERY_TASK_TIME_LIMIT = 300        # hard kill after 5 minutes
+CELERY_TASK_SOFT_TIME_LIMIT = 240   # SoftTimeLimitExceeded raised at 4 minutes
+
 # ── Groq — multiple keys (temporary, until company upgrades to paid tier) ────
 # settings.py mein
 GROQ_API_KEYS = [
