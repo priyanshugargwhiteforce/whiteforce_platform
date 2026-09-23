@@ -327,6 +327,11 @@ else:
     POPPLER_PATH = os.environ.get('POPPLER_PATH', None)
     SOFFICE_PATH = os.environ.get('SOFFICE_PATH', 'soffice')
 
+
+#---GEMINI API KEY
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.5-flash-lite')
+
 # ── Email Validator ───────────────────────────────────────────────────────────
 EMAIL_VALIDATOR = {
     'MAX_WORKERS':      50,

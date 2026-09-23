@@ -2,6 +2,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
@@ -29,6 +30,45 @@ if not _clients:
 
 _client_lock = threading.Lock()
 _client_cycle = itertools.cycle(range(len(_clients)))
+
+# ── Per-key rate-limit skip tracker ────────────────────────────────────────
+# When a key returns 429, we record how long to skip it so subsequent retries
+# jump straight to the next available key instead of hammering the same one.
+_rate_limit_lock = threading.Lock()
+_rate_limited_until: dict[int, float] = {idx: 0.0 for idx in range(len(_clients))}
+
+
+def _mark_rate_limited(key_idx: int, retry_after_seconds: float = 300.0) -> None:
+    """Mark a key as rate-limited for the given number of seconds."""
+    with _rate_limit_lock:
+        _rate_limited_until[key_idx] = time.time() + retry_after_seconds
+    logger.warning(f"Key {key_idx} marked rate-limited for {retry_after_seconds:.0f}s")
+
+
+def _get_next_available_client() -> tuple[Groq, int] | None:
+    """Round-robin but skip keys that are currently rate-limited.
+    Tries every key once; returns None if all are exhausted."""
+    now = time.time()
+    for _ in range(len(_clients)):
+        with _client_lock:
+            idx = next(_client_cycle)
+        with _rate_limit_lock:
+            if _rate_limited_until[idx] <= now:
+                return _clients[idx], idx
+    return None  # all keys rate-limited
+
+
+def _parse_retry_seconds(error_body: str) -> float:
+    """Parse 'Please try again in Xm Y.Zs' from Groq error message."""
+    match = re.search(r'try again in (\d+)m([\d.]+)s', error_body)
+    if match:
+        return int(match.group(1)) * 60 + float(match.group(2))
+    # fallback: look for just seconds
+    match = re.search(r'try again in ([\d.]+)s', error_body)
+    if match:
+        return float(match.group(1))
+    return 300.0  # default 5 min
+
 
 # ── Per-key token usage tracker (this worker session only) ─────────────────
 _usage_lock = threading.Lock()
@@ -78,13 +118,6 @@ def get_usage_summary() -> dict:
         return {idx: dict(stats) for idx, stats in _key_usage.items()}
 
 
-def _get_next_client() -> tuple[Groq, int]:
-    """Thread-safe round-robin client selection. Returns (client, index)."""
-    with _client_lock:
-        idx = next(_client_cycle)
-    return _clients[idx], idx
-
-
 def _make_schema_strict(schema: dict) -> dict:
     """Recursively force `required` to include every property. Kept for
     reference / future use, but NOT applied currently — see STRICT_CAPABLE_MODELS
@@ -105,12 +138,13 @@ def _make_schema_strict(schema: dict) -> dict:
 RESUME_JSON_SCHEMA = ResumeExtraction.model_json_schema()
 
 EXTRACTION_PROMPT = """You are a resume parsing engine. Extract structured information from the resume text below and return valid JSON with these fields:
-name, email, phone, gender, date_of_birth, marital_status, father_name, mother_name, linkedin_url, other_urls, education, known_languages, candidate_address, pincode/postal_code, hobbies, training, experience, skills, certifications, internships, profile_summary.
+name, email, phone, gender, date_of_birth, marital_status, father_name, mother_name, linkedin_url, other_urls, education, known_languages, candidate_address, total_experience, pincode/postal_code, hobbies, training, experience, skills, certifications, internships, profile_summary.
 
 Rules:
 - Include every field above, even if empty ("" or []). Never omit a field.
 - education: list each degree/qualification with degree, institution, and year if available.
 - hobbies: extract as a list of short keywords/phrases (e.g., "Reading", "Cricket"). If not mentioned, return [].
+- total_experience: extract as a single string (e.g., "5 years", "3.5 years"). If not mentioned, return "".
 - training: list each training/workshop with name, provider/institution, and year if available. If not mentioned, return [].
 - profile_summary: if the resume has an existing summary/objective section, copy it verbatim. Otherwise write a brief 2-3 sentence summary.
 - experience/internships descriptions: summarize in 1-2 short sentences, keeping specific numbers, tools, and achievements. Avoid long paragraphs.
@@ -135,11 +169,15 @@ STRICT_CAPABLE_MODELS = ()
 MIN_SECONDS_BETWEEN_CALLS = 1.0
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+@retry(stop=stop_after_attempt(len(_clients)), wait=wait_exponential(multiplier=1, min=1, max=10))
 def _call_groq(resume_text: str, model: str) -> dict:
     time.sleep(MIN_SECONDS_BETWEEN_CALLS)
 
-    client, key_idx = _get_next_client()
+    result = _get_next_available_client()
+    if result is None:
+        raise RuntimeError("All Groq keys are currently rate-limited")
+    client, key_idx = result
+
     is_strict = model in STRICT_CAPABLE_MODELS
 
     try:
@@ -178,7 +216,11 @@ def _call_groq(resume_text: str, model: str) -> dict:
         _record_usage(key_idx, getattr(response, "usage", None))
 
         return json.loads(response.choices[0].message.content)
+
     except Exception as e:
+        if getattr(e, 'status_code', None) == 429:
+            retry_secs = _parse_retry_seconds(str(getattr(e, 'body', '') or ''))
+            _mark_rate_limited(key_idx, retry_secs)
         status_code = getattr(e, 'status_code', None)
         response_body = getattr(e, 'body', None) or getattr(e, 'message', None)
         logger.warning(
@@ -202,12 +244,7 @@ def extract_structured_data(resume_text: str) -> tuple[ResumeExtraction, bool]:
         return ResumeExtraction(**fallback_data), True
 
 
-# ── JD extraction (new) ─────────────────────────────────────────────────────
-# Separate prompt/schema/call function rather than reusing _call_groq's resume
-# prompt — same reasoning single_parse.py used for not touching pipeline.py's
-# tested update_or_create call: keep the already-working resume-extraction
-# path completely untouched. Shares the client pool / rate-limit / retry
-# infra above (_get_next_client, _record_usage, MIN_SECONDS_BETWEEN_CALLS).
+# ── JD extraction ─────────────────────────────────────────────────────────────
 
 JD_JSON_SCHEMA = JobDescriptionExtraction.model_json_schema()
 
@@ -229,11 +266,14 @@ Job description text:
 """
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+@retry(stop=stop_after_attempt(len(_clients)), wait=wait_exponential(multiplier=1, min=1, max=10))
 def _call_groq_jd(jd_text: str, model: str) -> dict:
     time.sleep(MIN_SECONDS_BETWEEN_CALLS)
 
-    client, key_idx = _get_next_client()
+    result = _get_next_available_client()
+    if result is None:
+        raise RuntimeError("All Groq keys are currently rate-limited")
+    client, key_idx = result
 
     try:
         raw_response = client.chat.completions.with_raw_response.create(
@@ -255,7 +295,11 @@ def _call_groq_jd(jd_text: str, model: str) -> dict:
         response = raw_response.parse()
         _record_usage(key_idx, getattr(response, "usage", None))
         return json.loads(response.choices[0].message.content)
+
     except Exception as e:
+        if getattr(e, 'status_code', None) == 429:
+            retry_secs = _parse_retry_seconds(str(getattr(e, 'body', '') or ''))
+            _mark_rate_limited(key_idx, retry_secs)
         status_code = getattr(e, 'status_code', None)
         response_body = getattr(e, 'body', None) or getattr(e, 'message', None)
         logger.warning(
@@ -280,7 +324,7 @@ def extract_jd_structured(jd_text: str) -> tuple[JobDescriptionExtraction, bool]
         return JobDescriptionExtraction(), True
 
 
-# ── Resume <-> JD matching (new) ────────────────────────────────────────────
+# ── Resume <-> JD matching ───────────────────────────────────────────────────
 
 MATCH_JSON_SCHEMA = ResumeJDMatchResult.model_json_schema()
 
@@ -308,11 +352,14 @@ Candidate Profile (structured JSON):
 """
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+@retry(stop=stop_after_attempt(len(_clients)), wait=wait_exponential(multiplier=1, min=1, max=10))
 def _call_groq_match(jd_json: str, candidate_json: str, model: str) -> dict:
     time.sleep(MIN_SECONDS_BETWEEN_CALLS)
 
-    client, key_idx = _get_next_client()
+    result = _get_next_available_client()
+    if result is None:
+        raise RuntimeError("All Groq keys are currently rate-limited")
+    client, key_idx = result
 
     try:
         raw_response = client.chat.completions.with_raw_response.create(
@@ -343,7 +390,11 @@ def _call_groq_match(jd_json: str, candidate_json: str, model: str) -> dict:
         response = raw_response.parse()
         _record_usage(key_idx, getattr(response, "usage", None))
         return json.loads(response.choices[0].message.content)
+
     except Exception as e:
+        if getattr(e, 'status_code', None) == 429:
+            retry_secs = _parse_retry_seconds(str(getattr(e, 'body', '') or ''))
+            _mark_rate_limited(key_idx, retry_secs)
         status_code = getattr(e, 'status_code', None)
         response_body = getattr(e, 'body', None) or getattr(e, 'message', None)
         logger.warning(

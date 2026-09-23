@@ -150,6 +150,8 @@ def process_resume(resume_id: int) -> None:
                 "mother_name": extracted.mother_name,
                 "known_languages": extracted.known_languages,
                 "candidate_address": extracted.candidate_address,
+                # "projects": [p.model_dump() for p in extracted.projects],
+                "total_experience": extracted.total_experience,
                 "pincode_postal_code": extracted.pincode_postal_code,
                 "hobbies": extracted.hobbies,
                 "training": [t.model_dump() for t in extracted.training],

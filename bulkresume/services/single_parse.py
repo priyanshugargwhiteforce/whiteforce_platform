@@ -26,7 +26,7 @@ import logging
 
 from .deep_dive_ocr import deep_dive_ocr_extract
 from .extractors import extract_text
-from .llm_extractor import extract_structured_data
+from .gemini_extractor import extract_structured_data_gemini as extract_structured_data
 from .parse_score import compute_parse_score
 from .pipeline import OCR_DEEP_DIVE_SCORE_THRESHOLD, clean_resume_text
 
@@ -108,6 +108,8 @@ def build_profile_defaults(extracted, needs_review: bool, extraction_method: str
         "mother_name": extracted.mother_name,
         "known_languages": extracted.known_languages,
         "candidate_address": extracted.candidate_address,
+        # "projects": [p.model_dump() for p in extracted.projects],
+        "total_experience": extracted.total_experience,
         "pincode_postal_code": extracted.pincode_postal_code,
         "hobbies": extracted.hobbies,
         "training":[t.model_dump() for t in extracted.training],

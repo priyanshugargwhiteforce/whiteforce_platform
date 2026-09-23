@@ -147,6 +147,8 @@ def normalize_db_profile(db_profile: dict) -> dict:
         "mother_name": first("mother_name"),
         "known_languages": _split_csv(first("languages", "known_languages")) or first_list("known_languages", "languages"),
         "candidate_address": first("address", "candidate_address"),
+        # "projects": first_list("projects"),
+        "total_experience": first("total_experience"),
         "pincode_postal_code": first("pin_code", "pincode", "postal_code"),
         "hobbies": first_list("hobbies"),
         "training": first_list("training"),

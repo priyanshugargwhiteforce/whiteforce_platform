@@ -28,6 +28,8 @@ def regex_extract_basic_fields(text: str) -> dict:
         "mother_name": "",
         "known_languages": [],
         "candidate_address": "",
+        # "projects": [],
+        "total_experience": "",
         "pincode_postal_code": "",
         "hobbies": [],
         "training": [],
