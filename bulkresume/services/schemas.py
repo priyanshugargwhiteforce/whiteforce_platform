@@ -19,12 +19,14 @@ class Experience(BaseModel):
     duration: str = ""
     description: str = ""
 
-# class Projects(BaseModel):
-#     model_config = ConfigDict(extra="forbid")
 
-#     title: str = ""
-#     description: str = ""
-#     technologies: List[str] = Field(default_factory=list)
+class Project(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = ""
+    description: str = ""
+    technologies: List[str] = Field(default_factory=list)
+
 
 class Training(BaseModel):
     """
@@ -59,7 +61,7 @@ class ResumeExtraction(BaseModel):
     mother_name: str = ""
     known_languages: List[str] = Field(default_factory=list)
     candidate_address: str = ""
-    # projects: List[Projects] = Field(default_factory=list) # pyright: ignore[reportInvalidTypeForm]
+    projects: List[Project] = Field(default_factory=list)
     total_experience: str = ""
     pincode_postal_code: str = ""
     hobbies: List[str] = Field(default_factory=list)

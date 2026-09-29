@@ -47,7 +47,7 @@ class ParsedProfile(models.Model):
     father_name = models.CharField(max_length=255, blank=True, null=True)
     mother_name = models.CharField(max_length=255, blank=True, null=True)
     candidate_address = models.TextField(blank=True, null=True)
-    # projects = models.JSONField(default=list, blank=True, null=True)
+    projects = models.JSONField(default=list, blank=True, null=True)
     total_experience = models.CharField(max_length=50, blank=True, null=True)
     pincode_postal_code = models.CharField(max_length=20, blank=True, null=True)
     hobbies = models.JSONField(default=list, blank=True, null=True)

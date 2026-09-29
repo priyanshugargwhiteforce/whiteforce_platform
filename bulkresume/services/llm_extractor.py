@@ -138,7 +138,7 @@ def _make_schema_strict(schema: dict) -> dict:
 RESUME_JSON_SCHEMA = ResumeExtraction.model_json_schema()
 
 EXTRACTION_PROMPT = """You are a resume parsing engine. Extract structured information from the resume text below and return valid JSON with these fields:
-name, email, phone, gender, date_of_birth, marital_status, father_name, mother_name, linkedin_url, other_urls, education, known_languages, candidate_address, total_experience, pincode/postal_code, hobbies, training, experience, skills, certifications, internships, profile_summary.
+name, email, phone, gender, date_of_birth, marital_status, father_name, mother_name, linkedin_url, other_urls, education, known_languages, candidate_address, total_experience, pincode/postal_code, hobbies, training, experience, projects, skills, certifications, internships, profile_summary.
 
 Rules:
 - Include every field above, even if empty ("" or []). Never omit a field.
@@ -147,6 +147,7 @@ Rules:
 - total_experience: extract as a single string (e.g., "5 years", "3.5 years"). If not mentioned, return "".
 - training: list each training/workshop with name, provider/institution, and year if available. If not mentioned, return [].
 - profile_summary: if the resume has an existing summary/objective section, copy it verbatim. Otherwise write a brief 2-3 sentence summary.
+- projects: list each project with title, a 1-2 sentence description, and technologies (list of strings). If not mentioned, return [].
 - experience/internships descriptions: summarize in 1-2 short sentences, keeping specific numbers, tools, and achievements. Avoid long paragraphs.
 Resume text:
 ---
