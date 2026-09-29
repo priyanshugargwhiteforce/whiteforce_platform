@@ -147,7 +147,7 @@ Rules:
 - total_experience: extract as a single string (e.g., "5 years", "3.5 years"). If not mentioned, return "".
 - training: list each training/workshop with name, provider/institution, and year if available. If not mentioned, return [].
 - profile_summary: if the resume has an existing summary/objective section, copy it verbatim. Otherwise write a brief 2-3 sentence summary.
-- projects: list each project with title, a 1-2 sentence description, and technologies (list of strings). If not mentioned, return [].
+- projects: list each project with title, company (client/employer, "" if not stated), start_date and end_date (as written in the resume, "" if not stated), a 1-2 sentence description, and methodologies (list of strings). If not mentioned, return [].
 - experience/internships descriptions: summarize in 1-2 short sentences, keeping specific numbers, tools, and achievements. Avoid long paragraphs.
 Resume text:
 ---

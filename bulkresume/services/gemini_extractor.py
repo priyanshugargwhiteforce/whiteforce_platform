@@ -97,7 +97,7 @@ Field shapes:
 - education: list of objects {{"degree": str, "institution": str, "year": str}}.
 - training: list of objects {{"name": str, "provider": str, "year": str}}.
 - experience, internships: list of objects {{"title": str, "company": str, "duration": str, "description": str}}.
-- projects: list of objects {{"title": str, "description": str, "technologies": [str]}}.
+- projects: list of objects {{"title": str, "company": str, "start_date": str, "end_date": str, "description": str, "methodologies": [str]}}.
 
 Rules:
 - Include every field above, even if empty ("" or []). Never omit a field.
@@ -105,7 +105,7 @@ Rules:
 - total_experience: a single string (e.g., "5 years", "3.5 years"). If not mentioned, return "".
 - training: list each training/workshop with name, provider/institution, and year if available. If not mentioned, return [].
 - profile_summary: if the resume has an existing summary/objective section, copy it verbatim. Otherwise write a brief 2-3 sentence summary.
-- projects: list each project with title, a 1-2 sentence description, and the technologies used. If not mentioned, return [].
+- projects: list each project with title, company (client/employer the project was done for, "" if not stated), start_date and end_date (as written in the resume, e.g. "Jan 2022", "Present"; "" if not stated), a 1-2 sentence description, and the methodologies used. If not mentioned, return [].
 - experience/internships descriptions: summarize in 1-2 short sentences, keeping specific numbers, tools, and achievements. Avoid long paragraphs.
 
 Resume text:

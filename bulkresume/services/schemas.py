@@ -24,8 +24,11 @@ class Project(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = ""
+    company: str = ""
+    start_date: str = ""
+    end_date: str = ""
     description: str = ""
-    technologies: List[str] = Field(default_factory=list)
+    methodologies: List[str] = Field(default_factory=list)
 
 
 class Training(BaseModel):
