@@ -32,6 +32,7 @@ from django.conf import settings
 from pydantic import ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .json_coerce import TOP_LEVEL_ALIASES, coerce_to_model
 from .regex_fallback import regex_extract_basic_fields
 from .schemas import ResumeExtraction
 
@@ -96,7 +97,7 @@ Field shapes:
 - other_urls, known_languages, hobbies, skills, certifications: plain lists of strings ([] if none).
 - education: list of objects {{"degree": str, "institution": str, "year": str}}.
 - training: list of objects {{"name": str, "provider": str, "year": str}}.
-- experience, internships: list of objects {{"title": str, "company": str, "duration": str, "description": str}}.
+- experience, internships: list of objects {{"title": str, "company": str, "duration": str}}.
 - projects: list of objects {{"title": str, "company": str, "start_date": str, "end_date": str, "description": str, "methodologies": [str]}}.
 
 Rules:
@@ -106,7 +107,6 @@ Rules:
 - training: list each training/workshop with name, provider/institution, and year if available. If not mentioned, return [].
 - profile_summary: if the resume has an existing summary/objective section, copy it verbatim. Otherwise write a brief 2-3 sentence summary.
 - projects: list each project with title, company (client/employer the project was done for, "" if not stated), start_date and end_date (as written in the resume, e.g. "Jan 2022", "Present"; "" if not stated), a 1-2 sentence description, and the methodologies used. If not mentioned, return [].
-- experience/internships descriptions: summarize in 1-2 short sentences, keeping specific numbers, tools, and achievements. Avoid long paragraphs.
 
 Resume text:
 ---
@@ -166,7 +166,9 @@ def extract_structured_data_gemini(resume_text: str) -> tuple[ResumeExtraction, 
     """
     try:
         raw_json = _call_gemini(resume_text)
-        validated = ResumeExtraction(**raw_json)
+        # coerce_to_model drops any key the schema no longer has (e.g. a stray
+        # experience "description"), instead of failing the whole parse.
+        validated = ResumeExtraction(**coerce_to_model(raw_json, ResumeExtraction, TOP_LEVEL_ALIASES))
         return validated, False
     except (ValidationError, Exception) as exc:
         logger.warning(f"Gemini extraction failed, falling back to regex: {exc}")

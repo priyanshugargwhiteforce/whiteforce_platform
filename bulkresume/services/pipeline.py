@@ -89,7 +89,12 @@ def process_resume(resume_id: int) -> None:
         # stronger preprocessing and re-parse; keep whichever attempt scored
         # higher. Wrapped so a deep-dive failure never breaks the main flow —
         # worst case we just keep the original (already-saved) result.
-        if score.needs_ocr_deep_dive(threshold=OCR_DEEP_DIVE_SCORE_THRESHOLD):
+        # Skipped when the low score came from an LLM failure (regex fallback)
+        # on text that itself looks fine: OCR would return the same text, send
+        # it to the same failing LLM, and cost a full OCR pass (tens of
+        # seconds) for nothing. Garbled text still gets the deep-dive.
+        llm_failed_on_clean_text = needs_review and score.text_quality_score >= 60
+        if score.needs_ocr_deep_dive(threshold=OCR_DEEP_DIVE_SCORE_THRESHOLD) and not llm_failed_on_clean_text:
             logger.info(
                 f"Resume#{resume.id}: parse score {score.total_score} <= "
                 f"{OCR_DEEP_DIVE_SCORE_THRESHOLD}, attempting OCR deep-dive"
@@ -150,7 +155,8 @@ def process_resume(resume_id: int) -> None:
                 "mother_name": extracted.mother_name,
                 "known_languages": extracted.known_languages,
                 "candidate_address": extracted.candidate_address,
-                # "projects": [p.model_dump() for p in extracted.projects],
+                # None (JSON null) when the resume has no projects, not [].
+                "projects": [p.model_dump() for p in extracted.projects] or None,
                 "total_experience": extracted.total_experience,
                 "pincode_postal_code": extracted.pincode_postal_code,
                 "hobbies": extracted.hobbies,

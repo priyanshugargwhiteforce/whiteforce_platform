@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,6 +9,9 @@ class Education(BaseModel):
     degree: str = ""
     institution: str = ""
     year: str = ""
+    # Marks/percentage/CGPA exactly as written on the resume (e.g. "83.78%",
+    # "8.4 CGPA"); None when the resume doesn't state one for this qualification.
+    percentage: Optional[str] = None
 
 
 class Experience(BaseModel):
@@ -17,7 +20,6 @@ class Experience(BaseModel):
     title: str = ""
     company: str = ""
     duration: str = ""
-    description: str = ""
 
 
 class Project(BaseModel):

@@ -3,7 +3,7 @@ import logging
 
 from .extractors import extract_text
 from .file_classifier import classify_file
-from .llm_extractor import extract_jd_structured
+from .gemini_match import extract_jd_structured
 from .pipeline import clean_resume_text  # generic whitespace cleanup, not resume-specific despite the name
 from .schemas import JobDescriptionExtraction
 

@@ -1,39 +1,29 @@
 """
-Per-resume JD-matching pipeline. Called by tasks.match_resume_task (Celery),
-one call per resume in a match batch. Mirrors services/pipeline.py's
-process_resume() shape (status transitions, error handling) but for the
-resume<->JD matching flow:
+Per-resume pipeline for the Gemini JD-match route (POST /api/resumes/match-gemini/).
 
-  1. Classify the file, hash it.
-  2. Run the bulk-route resume parse (Groq extraction + OCR deep-dive retry,
-     Gemini as a fallback if Groq fails — services/bulk_route_parse.py) —
-     every resume gets parsed fresh, no DB profile lookup/shortcut.
-  3. Match the resulting candidate profile against the JD's structured
-     fields (services/matcher.py — Gemini match, verified against the resume
-     text, with deterministic fallback).
-  4. Save everything onto the ResumeMatch row.
-
-Deliberately does NOT touch services/pipeline.py or services/single_parse.py
-— reuses their already-tested functions instead of forking them, same
-approach single_parse.py itself used relative to pipeline.py.
+Same status transitions and result fields as services/match_pipeline.py, so
+the existing status endpoint reads its results unchanged; the difference is
+that the resume is parsed by Gemini into match_schemas.MatchResumeExtraction
+(services/gemini_resume_parser.py) instead of by the bulk Groq parser.
+The JD is structured by Gemini as well (services/jd_extractor.py), and the
+match itself is the same verified Gemini match (services/matcher.py).
 """
 import hashlib
 import logging
 
 from ..models import ResumeMatch
 from .file_classifier import classify_file
+from .gemini_resume_parser import build_match_profile, parse_resume_gemini_route
 from .matcher import match_candidate_against_jd
-from .bulk_route_parse import parse_resume_bulk_route
-from .single_parse import build_profile_defaults
 
 logger = logging.getLogger('bulkresume')
 
 
-def process_resume_match(resume_match_id: int) -> None:
+def process_resume_match_gemini(resume_match_id: int) -> None:
     match = ResumeMatch.objects.select_related('resume', 'jd').get(id=resume_match_id)
     resume = match.resume
     jd = match.jd
-    log_prefix = f"ResumeMatch#{match.id}: "
+    log_prefix = f"ResumeMatch#{match.id} (gemini): "
 
     match.status = 'processing'
     match.save(update_fields=['status'])
@@ -50,26 +40,19 @@ def process_resume_match(resume_match_id: int) -> None:
         resume.file_type = file_type
         resume.save(update_fields=['file_type', 'file_hash'])
 
-        # ── Parse the resume (no DB lookup shortcut — every resume goes
-        # through the full parse). parse_single_resume() does its own
-        # extract_text() + clean_resume_text() internally, so there's no
-        # separate text-extraction step here. ──────────────────────────────
-        parsed = parse_resume_bulk_route(file_path, file_type, log_prefix=log_prefix)
-        candidate_profile = build_profile_defaults(
-            parsed["extracted"], parsed["needs_review"], parsed["extraction_method"],
-            parsed["score"], parsed["ocr_deep_dive_used"],
-        )
+        # Every resume is parsed fresh -- no duplicate check, no DB profile shortcut.
+        parsed = parse_resume_gemini_route(file_path, file_type, log_prefix=log_prefix)
+        candidate_profile = build_match_profile(parsed)
+
         match.source = 'parsed'
         match.extraction_method = candidate_profile["extraction_method"]
         match.parse_score = candidate_profile["parse_score"]
         match.phone = candidate_profile.get("phone") or ""
+        match.candidate_profile = candidate_profile
+        match.candidate_name = candidate_profile.get("name") or ""
         resume.raw_text = parsed["raw_text"]
         resume.save(update_fields=['raw_text'])
 
-        match.candidate_profile = candidate_profile
-        match.candidate_name = candidate_profile.get("name") or ""
-
-        # ── Match candidate profile against the JD ──────────────────────────
         result = match_candidate_against_jd(
             jd.parsed, candidate_profile, log_prefix=log_prefix, raw_text=parsed["raw_text"]
         )

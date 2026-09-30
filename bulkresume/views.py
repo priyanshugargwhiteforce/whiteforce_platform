@@ -24,7 +24,7 @@ from .services.jd_extractor import (
     extract_jd_from_text,
 )
 from .services.single_parse import build_profile_defaults, parse_single_resume
-from .tasks import match_resume_task
+from .tasks import kick_dispatch_if_pending, match_resume_gemini_task, match_resume_task
 from .throttles import BulkUploadThrottle, JDMatchThrottle, SingleResumeParseThrottle
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 # Resume<->JD matching does 1-2 LLM calls per resume (parse, if not already
 # in the DB, + match), so keep the per-request batch smaller than the plain
 # bulk-upload one above. Bump if/when Groq capacity allows.
-MAX_MATCH_RESUMES = 10
+MAX_MATCH_RESUMES = 15
 
 
 class BulkResumeUploadView(APIView):
@@ -109,7 +109,10 @@ class BulkResumeUploadView(APIView):
         # dispatches process_resume_task for them, MAX_CONCURRENT_RESUME_PARSES
         # at a time system-wide — regardless of whether this batch is 5
         # resumes or 1500. This keeps a single huge upload from flooding
-        # Celery/Groq the instant it lands.
+        # Celery/Groq the instant it lands. The dispatcher is nudged right away
+        # so parsing starts now rather than at the next 30s Beat tick (the
+        # concurrency cap is still enforced by the dispatcher itself).
+        kick_dispatch_if_pending()
         return Response(
             {
                 "batch_id": batch_id,
@@ -313,7 +316,7 @@ class JDResumeMatchView(APIView):
     POST /api/resumes/match/
 
     Body (multipart/form-data):
-      resumes  : 1-10 resume files, repeated under the 'resumes' field
+      resumes  : 1-15 resume files, repeated under the 'resumes' field
       jd_file  : the JD as a file (pdf/doc/docx)   -- OR --
       jd_text  : the JD as plain pasted text        -- OR --
       jd_json  : the JD as a JSON string — either already shaped like
@@ -332,6 +335,8 @@ class JDResumeMatchView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [JDMatchThrottle]
     throttle_scope = 'jd_resume_match'
+    # Celery task queued per resume; JDResumeMatchGeminiView swaps this.
+    match_task = match_resume_task
 
     def post(self, request):
         files = request.FILES.getlist('resumes')
@@ -348,7 +353,7 @@ class JDResumeMatchView(APIView):
 
         if not files:
             return Response(
-                {"error": "No resumes provided. Attach 1-10 files under the 'resumes' field."},
+                {"error": f"No resumes provided. Attach 1-{MAX_MATCH_RESUMES} files under the 'resumes' field."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if len(files) > MAX_MATCH_RESUMES:
@@ -429,7 +434,7 @@ class JDResumeMatchView(APIView):
         queue_failures = []
         for match_id in match_ids:
             try:
-                match_resume_task.delay(match_id)
+                self.match_task.delay(match_id)
             except Exception:
                 logger.exception(f"Failed to queue match task {match_id} (batch {batch_id})")
                 queue_failures.append(match_id)
@@ -446,6 +451,20 @@ class JDResumeMatchView(APIView):
             return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
 
         return Response(response_data, status=status.HTTP_202_ACCEPTED)
+
+
+class JDResumeMatchGeminiView(JDResumeMatchView):
+    """
+    POST /api/resumes/match-gemini/
+
+    Same request body, validation, JD extraction (Gemini), response and
+    status endpoint as JDResumeMatchView -- the only difference is how each
+    resume is parsed: by Gemini into its own schema
+    (services/match_schemas.py, which keeps job/project descriptions that
+    matching needs) instead of the bulk Groq parser. Poll
+    GET /api/resumes/match-gemini/<batch_id>/status/ for results.
+    """
+    match_task = match_resume_gemini_task
 
 
 class JDMatchBatchStatusView(APIView):

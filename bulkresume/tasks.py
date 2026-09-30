@@ -2,9 +2,10 @@ import logging
 
 from celery import shared_task
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 
 from .services.match_pipeline import process_resume_match
+from .services.match_pipeline_gemini import process_resume_match_gemini
 from .services.pipeline import process_resume
 
 logger = logging.getLogger('bulkresume')
@@ -13,6 +14,28 @@ logger = logging.getLogger('bulkresume')
 # MAX_CONCURRENT_RESUME_PARSES = <n> to settings.py if you want to, 20 is
 # the default otherwise.
 MAX_CONCURRENT_RESUME_PARSES = getattr(settings, 'MAX_CONCURRENT_RESUME_PARSES', 20)
+
+# Arbitrary constant identifying the dispatcher's Postgres advisory lock.
+_DISPATCH_LOCK_KEY = 728_113_042
+
+
+def kick_dispatch_if_pending() -> None:
+    """
+    Best effort: run the dispatcher NOW instead of waiting for the next
+    30-second Beat tick. Called after an upload lands (so parsing starts
+    immediately) and after each resume finishes (so its freed slot is
+    refilled at once instead of sitting idle until the next tick).
+
+    Safe by construction: claim_and_dispatch_pending_resumes() still enforces
+    MAX_CONCURRENT_RESUME_PARSES, and Beat keeps running as a safety net, so
+    if this fails for any reason the worst case is the old 30s behaviour.
+    """
+    try:
+        from .models import Resume
+        if Resume.objects.filter(status='pending').exists():
+            dispatch_pending_resumes.delay()
+    except Exception:
+        logger.warning("Could not trigger immediate dispatch; Beat will pick pending resumes up", exc_info=True)
 
 
 @shared_task(
@@ -28,9 +51,11 @@ def process_resume_task(self, resume_id: int):
     try:
         process_resume(resume_id)
     except ValueError:
+        kick_dispatch_if_pending()
         return
     except Exception as exc:
         raise self.retry(exc=exc)
+    kick_dispatch_if_pending()
 
 
 @shared_task(
@@ -43,6 +68,22 @@ def process_resume_task(self, resume_id: int):
 def match_resume_task(self, resume_match_id: int):
     try:
         process_resume_match(resume_match_id)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@shared_task(
+    bind=True,
+    max_retries=2,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
+def match_resume_gemini_task(self, resume_match_id: int):
+    """Gemini JD-match route: Gemini parses the resume, then the verified
+    Gemini match runs (services/match_pipeline_gemini.py)."""
+    try:
+        process_resume_match_gemini(resume_match_id)
     except Exception as exc:
         raise self.retry(exc=exc)
 
@@ -62,15 +103,26 @@ def claim_and_dispatch_pending_resumes() -> str:
     """
     from .models import Resume  # local import avoids a circular import at module load time
 
-    in_flight = Resume.objects.filter(status__in=['queued', 'processing']).count()
-    slots = MAX_CONCURRENT_RESUME_PARSES - in_flight
-
-    if slots <= 0:
-        msg = f"{in_flight} resume(s) already in flight (limit {MAX_CONCURRENT_RESUME_PARSES}) — nothing claimed."
-        logger.info(msg)
-        return msg
-
     with transaction.atomic():
+        # The dispatcher can now be triggered from several places at once
+        # (Beat tick, upload request, every finished task -- see
+        # kick_dispatch_if_pending). Serialize the "count in-flight, then
+        # claim" step with a Postgres transaction-scoped advisory lock;
+        # otherwise two dispatchers could both see free slots and together
+        # claim more than MAX_CONCURRENT_RESUME_PARSES. Other databases keep
+        # the old (unlocked) behaviour.
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [_DISPATCH_LOCK_KEY])
+
+        in_flight = Resume.objects.filter(status__in=['queued', 'processing']).count()
+        slots = MAX_CONCURRENT_RESUME_PARSES - in_flight
+
+        if slots <= 0:
+            msg = f"{in_flight} resume(s) already in flight (limit {MAX_CONCURRENT_RESUME_PARSES}) — nothing claimed."
+            logger.info(msg)
+            return msg
+
         claimed_ids = list(
             Resume.objects.select_for_update(skip_locked=True)
             .filter(status='pending')

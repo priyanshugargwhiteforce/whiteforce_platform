@@ -1,7 +1,8 @@
 import logging
 
 from .deterministic_match import deterministic_match
-from .llm_extractor import match_resume_to_jd
+from .gemini_match import match_resume_to_jd
+from .match_verify import verify_field_breakdown
 
 logger = logging.getLogger('bulkresume')
 
@@ -25,6 +26,14 @@ def _classify_field(entry: dict, jd: dict) -> str:
     location."""
     field = (entry.get("field") or "").strip().lower()
     jd_requirement = (entry.get("jd_requirement") or "").strip().lower()
+
+    # The match prompt asks for these exact field values, so a paraphrased
+    # jd_requirement can no longer push a skill into the "other" bucket
+    # (which skipped the matched/missing skill lists and the 3x weight).
+    if field.startswith("must_have"):
+        return "must_have"
+    if field.startswith("good_to_have"):
+        return "good_to_have"
 
     if "experience" in field:
         return "experience"
@@ -116,7 +125,8 @@ def reconcile_match_result(jd: dict, result: dict) -> dict:
     return result
 
 
-def match_candidate_against_jd(jd_data: dict, candidate_data: dict, log_prefix: str = "") -> dict:
+def match_candidate_against_jd(jd_data: dict, candidate_data: dict, log_prefix: str = "",
+                               raw_text: str = "") -> dict:
     """
     Tries the semantic (LLM) matcher first — it understands synonyms,
     seniority, and context ("Node.js" satisfying a JD asking for "backend
@@ -145,5 +155,24 @@ def match_candidate_against_jd(jd_data: dict, candidate_data: dict, log_prefix: 
 
     data = result.model_dump()
     data["match_method"] = "llm"
+
+    # Check the model's rows against the actual resume before scoring: every
+    # JD requirement gets one row, unsupported "matches" are downgraded,
+    # verbatim skills the parser missed are recovered, and experience is
+    # compared numerically. See services/match_verify.py.
+    rows, changed, experience_text = verify_field_breakdown(
+        jd_data, candidate_data, raw_text, data.get("field_breakdown") or []
+    )
+    if rows:
+        data["field_breakdown"] = rows
+        if experience_text:
+            data["experience_match"] = experience_text
+        if changed:
+            # The model's prose was written before the corrections; blank it so
+            # reconcile_match_result() rebuilds it from the verified rows.
+            data["strengths_summary"] = ""
+            data["gaps_summary"] = ""
+            logger.info(f"{log_prefix}match rows corrected by resume verification")
+
     data = reconcile_match_result(jd_data, data)
     return data
