@@ -11,6 +11,10 @@ Implemented as a plain REST call via `requests` (already a project
 dependency) rather than adding google-generativeai/google-genai as a new
 SDK -- keeps requirements.txt untouched.
 
+API-key rotation: the HTTP call goes through services/gemini_keys.py, which
+holds all GEMINI_API_KEY_n keys and automatically falls over to the next key
+when one hits its rate limit / quota (429).
+
 Uses Gemini's responseMimeType=application/json JSON mode (prompt-only,
 NOT the responseSchema structured-output feature) -- Gemini's schema
 format is an OpenAPI-3.0 subset that doesn't support Pydantic's $defs/$ref
@@ -27,25 +31,22 @@ import logging
 import threading
 import traceback
 
-import requests
 from django.conf import settings
 from pydantic import ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .gemini_keys import get_gemini_pool
 from .json_coerce import TOP_LEVEL_ALIASES, coerce_to_model
 from .regex_fallback import regex_extract_basic_fields
 from .schemas import ResumeExtraction
 
 logger = logging.getLogger('bulkresume')
 
-GEMINI_API_KEY = getattr(settings, 'GEMINI_API_KEY', '')
 GEMINI_MODEL = getattr(settings, 'GEMINI_MODEL', 'gemini-3.5-flash-lite')
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 # ── Usage tracker (this process's session only) ─────────────────────────────
-# Same idea as llm_extractor.py's per-key Groq usage table, but simpler --
-# there's only one Gemini key here, not a round-robin pool, so this is a
-# single running total rather than a per-key dict.
+# Same idea as llm_extractor.py's per-key Groq usage table. Totals are across
+# all Gemini keys combined; the per-call log line shows which key was used.
 _usage_lock = threading.Lock()
 _gemini_usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -117,10 +118,6 @@ Resume text:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 def _call_gemini(resume_text: str) -> dict:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not configured in settings/.env")
-
-    url = GEMINI_API_URL.format(model=GEMINI_MODEL)
     payload = {
         "contents": [
             {"parts": [{"text": GEMINI_EXTRACTION_PROMPT.format(resume_text=resume_text[:6000])}]}
@@ -131,7 +128,10 @@ def _call_gemini(resume_text: str) -> dict:
         },
     }
 
-    response = requests.post(url, params={"key": GEMINI_API_KEY}, json=payload, timeout=30)
+    # The pool tries key #1 first and automatically falls over to #2, #3 on
+    # 429 / quota errors. Raises RuntimeError if no key is configured and
+    # GeminiKeysUnavailable if every key is cooling down.
+    response, key_no = get_gemini_pool().post(payload, model=GEMINI_MODEL, timeout=30, label="extract")
 
     if response.status_code != 200:
         logger.warning(f"Gemini call failed | status={response.status_code} | body={response.text[:500]}")
@@ -143,7 +143,7 @@ def _call_gemini(resume_text: str) -> dict:
     _record_usage(usage)
     if usage:
         logger.info(
-            f"Gemini ({GEMINI_MODEL}) | this call: "
+            f"Gemini ({GEMINI_MODEL}) key #{key_no} | this call: "
             f"{usage.get('promptTokenCount', 0)} prompt + "
             f"{usage.get('candidatesTokenCount', 0)} completion = "
             f"{usage.get('totalTokenCount', 0)} total tokens"

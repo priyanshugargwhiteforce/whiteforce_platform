@@ -6,6 +6,11 @@ services/llm_extractor.py); the two LLM steps that are specific to matching
 -- structuring the JD, and comparing one candidate to it -- run on Gemini
 and live here. Single-parse (services/gemini_extractor.py) is untouched.
 
+API-key rotation: every HTTP call goes through services/gemini_keys.py, which
+holds all GEMINI_API_KEY_n keys and automatically falls over to the next key
+when one hits its rate limit / quota (429). services/gemini_resume_parser.py
+imports _call_gemini_json from here, so it gets rotation for free.
+
 Why the shape of this module:
   - One JD is compared against ~10-15 resumes in a batch, so every resume
     must be judged by the SAME rubric (temperature 0, fixed row order,
@@ -26,19 +31,18 @@ from django.conf import settings
 from pydantic import ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
+from .gemini_keys import GeminiKeysUnavailable, get_gemini_pool
 from .json_coerce import coerce_to_model
 from .schemas import JobDescriptionExtraction, ResumeJDMatchResult
 
 logger = logging.getLogger('bulkresume')
 
-GEMINI_API_KEY = getattr(settings, 'GEMINI_API_KEY', '')
 GEMINI_MODEL = getattr(settings, 'GEMINI_MODEL', 'gemini-3.5-flash-lite')
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_TIMEOUT_SECONDS = 60
 
 
 class _GeminiRetryable(Exception):
-    """429 / 5xx / unparseable output -- worth another attempt."""
+    """429 / 5xx / unparseable output / all keys cooling down -- worth another attempt."""
 
 
 @retry(
@@ -50,9 +54,6 @@ class _GeminiRetryable(Exception):
     reraise=True,
 )
 def _call_gemini_json(system_prompt: str, user_prompt: str, label: str) -> dict:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not configured in settings/.env")
-
     payload = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -62,12 +63,17 @@ def _call_gemini_json(system_prompt: str, user_prompt: str, label: str) -> dict:
         },
     }
     try:
-        response = requests.post(
-            GEMINI_API_URL.format(model=GEMINI_MODEL),
-            params={"key": GEMINI_API_KEY}, json=payload, timeout=GEMINI_TIMEOUT_SECONDS,
+        # Pool: key #1 first, auto-failover to #2/#3 on 429 / quota / bad key.
+        # Raises RuntimeError (not retried) if no key is configured at all.
+        response, key_no = get_gemini_pool().post(
+            payload, model=GEMINI_MODEL, timeout=GEMINI_TIMEOUT_SECONDS, label=label
         )
     except (requests.ConnectionError, requests.Timeout) as exc:
         raise _GeminiRetryable(f"{label}: network error {exc!r}") from exc
+    except GeminiKeysUnavailable as exc:
+        # Every key is cooling down; the pool already waited if the soonest
+        # one was close. Let tenacity back off and try again.
+        raise _GeminiRetryable(f"{label}: {exc}") from exc
 
     if response.status_code == 429 or response.status_code >= 500:
         logger.warning(f"Gemini {label} call retryable | status={response.status_code} | body={response.text[:300]}")
@@ -79,7 +85,7 @@ def _call_gemini_json(system_prompt: str, user_prompt: str, label: str) -> dict:
     data = response.json()
     usage = data.get("usageMetadata") or {}
     logger.info(
-        f"Gemini ({GEMINI_MODEL}) {label} | {usage.get('promptTokenCount', 0)} prompt + "
+        f"Gemini ({GEMINI_MODEL}) key #{key_no} {label} | {usage.get('promptTokenCount', 0)} prompt + "
         f"{usage.get('candidatesTokenCount', 0)} completion tokens"
     )
 

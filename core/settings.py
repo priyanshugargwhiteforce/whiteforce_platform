@@ -10,6 +10,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ── Core ─────────────────────────────────────────────────────────────────────
+# NOTE: set a real DJANGO_SECRET_KEY in .env on the VPS -- the fallback below is
+# only for local development.
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-change-me-in-production')
 DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost,*').split(',')
@@ -80,7 +82,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.environ.get('DB_NAME'),
         'USER': os.environ.get('DB_USER'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', 'Whiteforce123@'),
+        'PASSWORD': os.environ.get('DB_PASSWORD'),   # never hardcode a default password here
         'HOST': os.environ.get('DB_HOST', 'localhost'),
         'PORT': os.environ.get('DB_PORT', '5432'),
     }
@@ -328,9 +330,32 @@ else:
     SOFFICE_PATH = os.environ.get('SOFFICE_PATH', 'soffice')
 
 
-#---GEMINI API KEY
+# ── Gemini — multiple keys with automatic failover ───────────────────────────
+# .env:
+#   GEMINI_API_KEY_1=...   <- always tried first
+#   GEMINI_API_KEY_2=...   <- used when key 1 hits its rate limit / quota
+#   GEMINI_API_KEY_3=...
+# Failover logic lives in bulkresume/services/gemini_keys.py.
+# IMPORTANT: free-tier quota is per Google Cloud PROJECT, not per key -- create
+# each key in a DIFFERENT project or all keys will hit the limit together.
+# (sorted() is lexicographic: fine for _1.._9; use zero-padded names past 9.)
+GEMINI_API_KEYS = []
+for _k, _v in sorted(os.environ.items()):
+    if _k.startswith('GEMINI_API_KEY_') and _v and _v not in GEMINI_API_KEYS:
+        GEMINI_API_KEYS.append(_v)
+
+# Backward compat: the old single GEMINI_API_KEY still works if no numbered keys exist.
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+if not GEMINI_API_KEYS and GEMINI_API_KEY:
+    GEMINI_API_KEYS = [GEMINI_API_KEY]
+
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.5-flash-lite')
+
+# Failover tuning (all optional, seconds):
+GEMINI_KEY_COOLDOWN = int(os.environ.get('GEMINI_KEY_COOLDOWN', 65))             # per-minute (RPM/TPM) limit
+GEMINI_DAILY_COOLDOWN = int(os.environ.get('GEMINI_DAILY_COOLDOWN', 3600))       # daily quota (RPD) exhausted
+GEMINI_INVALID_KEY_COOLDOWN = int(os.environ.get('GEMINI_INVALID_KEY_COOLDOWN', 3600))  # invalid/leaked key
+GEMINI_MAX_WAIT = int(os.environ.get('GEMINI_MAX_WAIT', 30))                     # if all keys are cooling, wait at most this long
 
 # ── Email Validator ───────────────────────────────────────────────────────────
 EMAIL_VALIDATOR = {
