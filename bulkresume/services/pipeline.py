@@ -9,6 +9,8 @@ from .deep_dive_ocr import deep_dive_ocr_extract
 from .dedup_check import DedupCheckError, check_duplicate_in_db
 from .extractors import extract_text
 from .file_classifier import classify_file
+from .gemini_extractor import extract_structured_data_gemini
+from .gemini_keys import get_gemini_bulk_pool
 from .llm_extractor import extract_structured_data
 from .parse_score import compute_parse_score
 from .regex_fallback import regex_extract_basic_fields
@@ -30,6 +32,36 @@ def clean_resume_text(text: str) -> str:
     # Trailing whitespace per line
     text = '\n'.join(line.rstrip() for line in text.split('\n'))
     return text.strip()
+
+
+def _extract_groq_then_gemini_bulk(text: str, log_prefix: str = ""):
+    """
+    Bulk-upload extraction: Groq first; if Groq falls back to regex (e.g. all
+    Groq keys rate-limited), retry once with the dedicated BULK Gemini key
+    pool (GEMINI_BULK_API_KEY_n). Those keys are used ONLY here -- single
+    parse and JD matching keep using the normal GEMINI_API_KEY_n pool.
+
+    Returns (extracted, needs_review, used_gemini).
+    Lives in this file (not bulk_route_parse.py) because bulk_route_parse
+    imports from pipeline -- importing the other way would be circular.
+    """
+
+    if not getattr(settings, 'BULK_USE_GROQ', True):
+        extracted, needs_review = extract_structured_data_gemini(text, pool=get_gemini_bulk_pool())
+        return extracted, needs_review, not needs_review
+
+
+    extracted, needs_review = extract_structured_data(text)
+    if needs_review:
+        logger.info(f"{log_prefix}Groq fell back to regex, retrying with Gemini bulk keys")
+        try:
+            g_extracted, g_review = extract_structured_data_gemini(text, pool=get_gemini_bulk_pool())
+        except Exception as exc:
+            logger.warning(f"{log_prefix}Gemini bulk fallback failed: {exc!r}, keeping regex result")
+        else:
+            if not g_review:
+                return g_extracted, False, True
+    return extracted, needs_review, False
 
 
 def process_resume(resume_id: int) -> None:
@@ -76,8 +108,14 @@ def process_resume(resume_id: int) -> None:
             logger.info(f"Resume#{resume.id} skipped: duplicate email/phone found in DB")
             return
 
-        extracted, needs_review = extract_structured_data(raw_text)
-        extraction_method = "regex_fallback" if needs_review else "llm"
+        # Groq first, then the dedicated bulk Gemini keys if Groq fell back to regex.
+        extracted, needs_review, used_gemini = _extract_groq_then_gemini_bulk(
+            raw_text, f"Resume#{resume.id}: "
+        )
+        if needs_review:
+            extraction_method = "regex_fallback"
+        else:
+            extraction_method = "llm_gemini_fallback" if used_gemini else "llm"
 
         score = compute_parse_score(extracted, raw_text)
         ocr_deep_dive_used = False
@@ -119,7 +157,9 @@ def process_resume(resume_id: int) -> None:
 
                 if ocr_text:
                     ocr_text = clean_resume_text(ocr_text)
-                    ocr_extracted, ocr_needs_review = extract_structured_data(ocr_text)
+                    ocr_extracted, ocr_needs_review, ocr_gemini = _extract_groq_then_gemini_bulk(
+                        ocr_text, f"Resume#{resume.id}: "
+                    )
                     ocr_score = compute_parse_score(ocr_extracted, ocr_text)
 
                     logger.info(
@@ -130,7 +170,12 @@ def process_resume(resume_id: int) -> None:
                     if ocr_score.total_score > score.total_score:
                         extracted = ocr_extracted
                         needs_review = ocr_needs_review
-                        extraction_method = "regex_fallback" if needs_review else "llm_ocr_deep_dive"
+                        if needs_review:
+                            extraction_method = "regex_fallback"
+                        else:
+                            extraction_method = (
+                                "llm_gemini_ocr_deep_dive" if ocr_gemini else "llm_ocr_deep_dive"
+                            )
                         raw_text = ocr_text
                         score = ocr_score
                         ocr_deep_dive_used = True

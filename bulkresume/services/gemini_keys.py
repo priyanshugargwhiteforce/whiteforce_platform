@@ -181,3 +181,16 @@ def get_gemini_pool() -> GeminiKeyPool:
             _pool = GeminiKeyPool(keys)
             logger.info(f"Gemini key pool initialised with {len(keys)} key(s)")
         return _pool
+
+_bulk_pool: GeminiKeyPool | None = None
+
+
+def get_gemini_bulk_pool() -> GeminiKeyPool:
+    """Separate pool used ONLY by the bulk-upload route."""
+    global _bulk_pool
+    with _pool_lock:
+        if _bulk_pool is None:
+            keys = list(_cfg('GEMINI_BULK_API_KEYS', []) or [])
+            _bulk_pool = GeminiKeyPool(keys)
+            logger.info(f"Gemini BULK key pool initialised with {len(keys)} key(s)")
+        return _bulk_pool

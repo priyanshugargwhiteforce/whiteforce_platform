@@ -77,24 +77,24 @@ TEMPLATES = [
 ]
 
 # Database ──────────────────────────────────────────────────────────────────
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('DB_NAME'),
-        'USER': os.environ.get('DB_USER'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', 'Whiteforce123@'),
-        'HOST': os.environ.get('DB_HOST', 'localhost'),
-        'PORT': os.environ.get('DB_PORT', '5432'),
-    }
-}
-
-# Local SQLite alternative (uncomment for quick local testing without Postgres):
 # DATABASES = {
 #     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': os.environ.get('DB_NAME'),
+#         'USER': os.environ.get('DB_USER'),
+#         'PASSWORD': os.environ.get('DB_PASSWORD', 'Whiteforce123@'),
+#         'HOST': os.environ.get('DB_HOST', 'localhost'),
+#         'PORT': os.environ.get('DB_PORT', '5432'),
 #     }
 # }
+
+# Local SQLite alternative (uncomment for quick local testing without Postgres):
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
 
 # ── Cache (used by notifications rate limiter) ────────────────────────────────
 CACHES = {
@@ -359,6 +359,12 @@ GEMINI_DAILY_COOLDOWN = int(os.environ.get('GEMINI_DAILY_COOLDOWN', 3600))      
 GEMINI_INVALID_KEY_COOLDOWN = int(os.environ.get('GEMINI_INVALID_KEY_COOLDOWN', 3600))  # invalid/leaked key
 GEMINI_MAX_WAIT = int(os.environ.get('GEMINI_MAX_WAIT', 30))                     # if all keys are cooling, wait at most this long
 
+
+BULK_USE_GROQ = os.environ.get('BULK_USE_GROQ', 'true').lower() == 'true'
+
+GEMINI_BULK_API_KEYS = [
+    k for k in (os.environ.get(f'GEMINI_BULK_API_KEY_{i}', '').strip() for i in range(1, 11)) if k
+]
 # ── Email Validator ───────────────────────────────────────────────────────────
 EMAIL_VALIDATOR = {
     'MAX_WORKERS':      50,
