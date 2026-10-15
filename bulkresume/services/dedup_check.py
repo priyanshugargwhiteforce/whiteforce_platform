@@ -1,4 +1,5 @@
 import logging
+import re
 
 import requests
 from django.conf import settings
@@ -11,47 +12,48 @@ class DedupCheckError(Exception):
     pass
 
 
+def _normalize_phone(phone: str) -> str:
+    """Keep digits only; drop +91 / 91 / 0 prefix so we send a clean 10-digit number."""
+    digits = re.sub(r'\D', '', phone or '')
+    if len(digits) > 10:
+        digits = digits[-10:]
+    return digits
+
+
 def check_duplicate_in_db(email: str, phone: str) -> bool:
     """
-    Calls the White Force "check-candidate-exists" API to check whether
-    this email or phone already exists in the candidates database.
+    Calls the White Force "check-candidate-exists" API with the candidate's
+    mobile number. The API only supports mobile lookup (email-only requests
+    return 422), so `email` is kept in the signature for compatibility but
+    is not used for the lookup.
 
-    API docs:
-        POST https://white-force.com/plus/api/check-candidate-exists
-        Body: {"phone": "...", "email": "..."}
-        Public/open — no auth required.
+    Response shape:
+        {"status": true, "found_count": 1,
+         "data": [{"mobile": "...", "exists": true, "source": "candidates", "data": {...}}]}
 
     Returns:
         True  -> candidate already exists (skip LLM parsing)
-        False -> candidate does not exist (go ahead and parse with LLM)
+        False -> candidate does not exist (go ahead and parse)
 
     Raises:
-        DedupCheckError if the API call fails. Callers should decide whether
-        to fail open (treat as "not duplicate", parse anyway) or fail closed.
+        DedupCheckError if the API call fails (network / 5xx / unexpected shape).
+        Callers fail OPEN (parse anyway).
     """
-    if not email and not phone:
-        # Nothing to check against — treat as not-a-duplicate so it still
-        # goes through LLM extraction (regex just couldn't find anything).
+    mobile = _normalize_phone(phone)
+    if len(mobile) != 10:
+        # No usable phone number found by regex -> can't check, so parse.
+        logger.info(f"Dedup check skipped: no valid phone (email={email!r} phone={phone!r})")
         return False
 
     api_url = settings.DUPLICATE_CHECK_API_URL
-
     if not api_url:
-        # Feature not configured yet — behave exactly like before (no skip).
         logger.debug("DUPLICATE_CHECK_API_URL not set; skipping dedup check.")
         return False
 
-    payload = {}
-    if phone:
-        payload["phone"] = phone
-    if email:
-        payload["email"] = email
+    payload = {"phone": mobile}
 
     try:
         response = requests.post(api_url, json=payload, timeout=8)
-        # API returns 404 for "not found" and 422 for missing params —
-        # both are valid, parseable JSON responses, not transport failures.
-        # Only raise for real server errors (5xx) or connection issues.
         if response.status_code >= 500:
             response.raise_for_status()
         data = response.json()
@@ -62,11 +64,17 @@ def check_duplicate_in_db(email: str, phone: str) -> bool:
         logger.warning(f"Duplicate-check API returned invalid JSON: {exc}")
         raise DedupCheckError(str(exc)) from exc
 
-    exists = bool(data.get("exists"))
-    matched_by = data.get("matched_by")
+    if response.status_code != 200 or not data.get("status"):
+        # e.g. 422 validation error -> don't silently treat as "not duplicate"
+        logger.warning(f"Dedup API unexpected response: status={response.status_code} body={data}")
+        raise DedupCheckError(f"Unexpected dedup API response: {data.get('message')}")
 
+    results = data.get("data") or []
+    exists = any(item.get("exists") for item in results) or (data.get("found_count", 0) > 0)
+
+    matched = results[0].get("data", {}) if results and results[0].get("exists") else {}
     logger.info(
-        f"Dedup check for email={email!r} phone={phone!r} "
-        f"-> exists={exists} matched_by={matched_by}"
+        f"Dedup check for phone={mobile!r} (email={email!r}) -> exists={exists} "
+        f"matched_candidate_id={matched.get('id')}"
     )
     return exists

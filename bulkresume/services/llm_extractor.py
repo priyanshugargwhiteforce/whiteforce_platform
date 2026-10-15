@@ -10,7 +10,7 @@ import traceback
 from django.conf import settings
 from groq import Groq
 from pydantic import ValidationError
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from .regex_fallback import regex_extract_basic_fields
 from .experience_calc import estimate_total_experience
@@ -27,7 +27,9 @@ print("HTTP_PROXY:", os.environ.get("HTTP_PROXY"))
 # ── Multiple Groq clients, round-robin ─────────────────────────────────────
 # Temporary measure while the company sets up a paid/higher-tier Groq plan.
 # All keys belong to company-owned accounts.
-_clients = [Groq(api_key=key) for key in settings.GROQ_API_KEYS]
+# CHANGED: max_retries=0 -> Groq SDK apne aap 429 par sleep+retry nahi karega.
+# Key rotation hum khud handle karte hain (neeche), SDK ka wait sirf time waste tha.
+_clients = [Groq(api_key=key, max_retries=0) for key in settings.GROQ_API_KEYS]
 if not _clients:
     raise RuntimeError("No GROQ_API_KEYS configured in settings/.env")
 
@@ -39,6 +41,12 @@ _client_cycle = itertools.cycle(range(len(_clients)))
 # jump straight to the next available key instead of hammering the same one.
 _rate_limit_lock = threading.Lock()
 _rate_limited_until: dict[int, float] = {idx: 0.0 for idx in range(len(_clients))}
+
+
+class GroqKeysExhausted(RuntimeError):
+    """Every Groq key is cooling down after a 429. Retrying inside the same
+    call cannot help (nothing changes in a few seconds), so this is raised
+    without going through the retry/backoff loop."""
 
 
 def _mark_rate_limited(key_idx: int, retry_after_seconds: float = 300.0) -> None:
@@ -71,6 +79,18 @@ def _parse_retry_seconds(error_body: str) -> float:
     if match:
         return float(match.group(1))
     return 300.0  # default 5 min
+
+
+# CHANGED (new): har key ka cooldown status dekhne ke liye.
+def get_groq_key_status() -> list[dict]:
+    """Har key ka cooldown: available hai ya kitne seconds baad ready hogi.
+    Note: state sirf is worker process ki memory mein hai."""
+    now = time.time()
+    with _rate_limit_lock:
+        return [
+            {"key": i, "available": until <= now, "ready_in_s": max(0, int(until - now))}
+            for i, until in _rate_limited_until.items()
+        ]
 
 
 # ── Per-key token usage tracker (this worker session only) ─────────────────
@@ -165,7 +185,27 @@ def _reasoning_kwargs(model: str) -> dict:
     return {}
 
 
-@retry(stop=stop_after_attempt(len(_clients)), wait=wait_exponential(multiplier=1, min=1, max=10))
+# CHANGED (new): 429 par sleep nahi, kyunki agli attempt alag key use karegi.
+# Baaki errors par pehle jaisa exponential backoff.
+_backoff = wait_exponential(multiplier=1, min=1, max=10)
+
+
+def _wait_strategy(retry_state):
+    """429 par sleep nahi: agli key alag hai, turant try karo."""
+    exc = retry_state.outcome.exception()
+    if getattr(exc, 'status_code', None) == 429:
+        return 0
+    return _backoff(retry_state)
+
+
+# GroqKeysExhausted is excluded from the retry loop: when every key is cooling
+# down, 10 retries with exponential backoff only burned ~65 s per resume
+# before giving up, with no chance of a different outcome.
+@retry(
+    stop=stop_after_attempt(len(_clients)),
+    wait=_wait_strategy,  # CHANGED: was wait_exponential(multiplier=1, min=1, max=10)
+    retry=retry_if_not_exception_type(GroqKeysExhausted),
+)
 def _groq_json_call(system_prompt: str, user_prompt: str, schema_name: str, schema: dict,
                     model: str, stagger: float, label: str) -> dict:
     """One Groq JSON-schema call with key rotation + 429 tracking. The static
@@ -177,7 +217,10 @@ def _groq_json_call(system_prompt: str, user_prompt: str, schema_name: str, sche
 
     result = _get_next_available_client()
     if result is None:
-        raise RuntimeError("All Groq keys are currently rate-limited")
+        # CHANGED: log mein dikhao ki sabse pehli key kab free hogi.
+        soonest = min(s["ready_in_s"] for s in get_groq_key_status())
+        logger.warning(f"All Groq keys cooling down, earliest ready in {soonest}s")
+        raise GroqKeysExhausted("All Groq keys are currently rate-limited")
     client, key_idx = result
 
     try:
@@ -312,6 +355,12 @@ def extract_structured_data(resume_text: str) -> tuple[ResumeExtraction, bool]:
                 [e.duration for e in validated.experience]
             )
         return validated, False
+    except GroqKeysExhausted:
+        # All keys cooling down: skip the long traceback and return the regex
+        # result immediately (needs_review=True) so the caller can try Gemini.
+        logger.warning("All Groq keys are cooling down, falling back (caller may try Gemini)")
+        fallback_data = regex_extract_basic_fields(resume_text)
+        return ResumeExtraction(**fallback_data), True
     except (ValidationError, Exception) as exc:
         logger.warning(f"Groq extraction failed, falling back to regex: {exc}")
         logger.warning(traceback.format_exc())
