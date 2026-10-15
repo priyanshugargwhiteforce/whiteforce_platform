@@ -1,23 +1,18 @@
 """
 GEMINI-BASED RESUME EXTRACTION
 --------------------------------
-Used by services/single_parse.py (the synchronous SingleResumeParseView /
-POST /api/resumes/parse/ endpoint), by the JD-match route that falls back to
-Gemini (services/bulk_route_parse.py), and by the bulk-upload pipeline
-(services/pipeline.py) as a fallback when Groq is rate-limited.
-
-Key pools: by default every call uses the shared pool from
-services/gemini_keys.get_gemini_pool() (GEMINI_API_KEY_n). The bulk-upload
-pipeline passes its own pool (get_gemini_bulk_pool(), GEMINI_BULK_API_KEY_n)
-through the optional `pool` argument, so bulk parsing never consumes the keys
-used by single parse and JD matching.
+Used ONLY by services/single_parse.py (i.e. only the synchronous
+SingleResumeParseView / POST /api/resumes/parse/ endpoint). The bulk
+upload pipeline (services/pipeline.py) and the JD-match pipeline
+(services/match_pipeline.py) continue to use Groq via
+services/llm_extractor.extract_structured_data() -- completely untouched.
 
 Implemented as a plain REST call via `requests` (already a project
 dependency) rather than adding google-generativeai/google-genai as a new
 SDK -- keeps requirements.txt untouched.
 
 API-key rotation: the HTTP call goes through services/gemini_keys.py, which
-holds all keys of a pool and automatically falls over to the next key
+holds all GEMINI_API_KEY_n keys and automatically falls over to the next key
 when one hits its rate limit / quota (429).
 
 Uses Gemini's responseMimeType=application/json JSON mode (prompt-only,
@@ -122,7 +117,7 @@ Resume text:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
-def _call_gemini(resume_text: str, pool=None) -> dict:
+def _call_gemini(resume_text: str) -> dict:
     payload = {
         "contents": [
             {"parts": [{"text": GEMINI_EXTRACTION_PROMPT.format(resume_text=resume_text[:6000])}]}
@@ -136,10 +131,7 @@ def _call_gemini(resume_text: str, pool=None) -> dict:
     # The pool tries key #1 first and automatically falls over to #2, #3 on
     # 429 / quota errors. Raises RuntimeError if no key is configured and
     # GeminiKeysUnavailable if every key is cooling down.
-    # `pool` is optional: callers that pass nothing (single parse, /match/)
-    # use the shared pool; the bulk pipeline passes its own dedicated pool.
-    active_pool = pool or get_gemini_pool()
-    response, key_no = active_pool.post(payload, model=GEMINI_MODEL, timeout=30, label="extract")
+    response, key_no = get_gemini_pool().post(payload, model=GEMINI_MODEL, timeout=30, label="extract")
 
     if response.status_code != 200:
         logger.warning(f"Gemini call failed | status={response.status_code} | body={response.text[:500]}")
@@ -165,18 +157,15 @@ def _call_gemini(resume_text: str, pool=None) -> dict:
     return json.loads(text)
 
 
-def extract_structured_data_gemini(resume_text: str, pool=None) -> tuple[ResumeExtraction, bool]:
+def extract_structured_data_gemini(resume_text: str) -> tuple[ResumeExtraction, bool]:
     """
     Gemini equivalent of llm_extractor.extract_structured_data() -- same
-    (ResumeExtraction, needs_review) return shape, same regex-fallback-on-
-    failure behavior -- so services/single_parse.py can swap one call for
-    the other with no other code changes.
-
-    `pool` (optional): a GeminiKeyPool to use instead of the shared one.
-    Leave it as None for single parse and JD matching.
+    signature, same (ResumeExtraction, needs_review) return shape, same
+    regex-fallback-on-failure behavior -- so services/single_parse.py can
+    swap one call for the other with no other code changes.
     """
     try:
-        raw_json = _call_gemini(resume_text, pool=pool)
+        raw_json = _call_gemini(resume_text)
         # coerce_to_model drops any key the schema no longer has (e.g. a stray
         # experience "description"), instead of failing the whole parse.
         validated = ResumeExtraction(**coerce_to_model(raw_json, ResumeExtraction, TOP_LEVEL_ALIASES))

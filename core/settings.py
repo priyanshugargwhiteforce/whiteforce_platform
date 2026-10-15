@@ -359,12 +359,6 @@ GEMINI_DAILY_COOLDOWN = int(os.environ.get('GEMINI_DAILY_COOLDOWN', 3600))      
 GEMINI_INVALID_KEY_COOLDOWN = int(os.environ.get('GEMINI_INVALID_KEY_COOLDOWN', 3600))  # invalid/leaked key
 GEMINI_MAX_WAIT = int(os.environ.get('GEMINI_MAX_WAIT', 30))                     # if all keys are cooling, wait at most this long
 
-
-BULK_USE_GROQ = os.environ.get('BULK_USE_GROQ', 'true').lower() == 'true'
-
-GEMINI_BULK_API_KEYS = [
-    k for k in (os.environ.get(f'GEMINI_BULK_API_KEY_{i}', '').strip() for i in range(1, 11)) if k
-]
 # ── Email Validator ───────────────────────────────────────────────────────────
 EMAIL_VALIDATOR = {
     'MAX_WORKERS':      50,

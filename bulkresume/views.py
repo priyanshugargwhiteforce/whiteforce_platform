@@ -251,18 +251,9 @@ class BatchStatusView(APIView):
         failed_count = resumes.filter(status='failed').count()
         pending_count = resumes.filter(status__in=['pending', 'queued', 'processing']).count()
 
-        # Of the ones marked 'done', split by which LLM parsed them.
-        # extraction_method values: llm, llm_ocr_deep_dive (Groq);
-        # llm_gemini, llm_gemini_fallback, llm_gemini_ocr_deep_dive (Gemini);
-        # regex_fallback (no LLM).
-        gemini_parsed_count = resumes.filter(
-            status='done', profile__extraction_method__startswith='llm_gemini'
-        ).count()
-        groq_parsed_count = resumes.filter(
-            status='done', profile__extraction_method__startswith='llm'
-        ).exclude(
-            profile__extraction_method__startswith='llm_gemini'
-        ).count()
+        # Of the ones marked 'done', how many actually hit the LLM vs.
+        # fell back to plain regex extraction (e.g. LLM call failed).
+        llm_parsed_count = resumes.filter(status='done', profile__extraction_method='llm').count()
         regex_fallback_count = resumes.filter(status='done', profile__extraction_method='regex_fallback').count()
         ocr_deep_dive_count = resumes.filter(status='done', profile__ocr_deep_dive_used=True).count()
 
@@ -277,9 +268,7 @@ class BatchStatusView(APIView):
 
         summary = {
             "total": total,
-            "done": done_count,
-            "groq_parsed": groq_parsed_count,
-            "gemini_parsed": gemini_parsed_count,
+            "llm_parsed": llm_parsed_count,
             "regex_fallback": regex_fallback_count,
             "ocr_deep_dive_used": ocr_deep_dive_count,
             "average_parse_score": average_parse_score,
@@ -293,6 +282,7 @@ class BatchStatusView(APIView):
             {"batch_id": batch_id, "summary": summary, "resumes": serializer.data},
             status=status.HTTP_200_OK,
         )
+
 
 class ResumeDetailView(APIView):
     authentication_classes = [ApiKeyAuthentication]
