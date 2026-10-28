@@ -14,6 +14,15 @@ MONTHS = {
 }
 
 
+def tally_date(yyyymmdd):
+    """
+    20261001 -> 1-Oct-2026. Tally only applies SVFROMDATE/SVTODATE to a
+    Voucher collection when they're sent as TYPE="Date" in this format;
+    with plain YYYYMMDD it scans every voucher in the company.
+    """
+    return f"{int(yyyymmdd[6:8])}-{MONTHS[yyyymmdd[4:6]][:3]}-{yyyymmdd[:4]}"
+
+
 def get_ledger_xml():
     return """
     <ENVELOPE>
@@ -58,8 +67,8 @@ def get_voucher_xml(ledger_name, fy="2026-27", from_date=None, to_date=None):
             <DESC>
                 <STATICVARIABLES>
                     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-                    <SVFROMDATE>{fd}</SVFROMDATE>
-                    <SVTODATE>{td}</SVTODATE>
+                    <SVFROMDATE TYPE="Date">{tally_date(fd)}</SVFROMDATE>
+                    <SVTODATE TYPE="Date">{tally_date(td)}</SVTODATE>
                 </STATICVARIABLES>
                 <TDL>
                     <TDLMESSAGE>
@@ -78,10 +87,13 @@ def get_voucher_xml(ledger_name, fy="2026-27", from_date=None, to_date=None):
                                 ALLLEDGERENTRIES.LIST.AMOUNT,
                                 ALLLEDGERENTRIES.LIST.ISDEEMEDPOSITIVE
                             </FETCH>
-                            <FILTERS>LedgerFilter</FILTERS>
+                            <FILTERS>LedgerFilter, DateRangeFilter</FILTERS>
                         </COLLECTION>
                         <SYSTEM TYPE="Formulae" NAME="LedgerFilter">
                             $PartyLedgerName="{safe_name}"
+                        </SYSTEM>
+                        <SYSTEM TYPE="Formulae" NAME="DateRangeFilter">
+                            $Date &gt;= ##SVFromDate AND $Date &lt;= ##SVToDate
                         </SYSTEM>
                     </TDLMESSAGE>
                 </TDL>
@@ -109,8 +121,8 @@ def get_all_ledgers_with_vouchers_xml(fy="2026-27", from_date=None, to_date=None
             <DESC>
                 <STATICVARIABLES>
                     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-                    <SVFROMDATE>{fd}</SVFROMDATE>
-                    <SVTODATE>{td}</SVTODATE>
+                    <SVFROMDATE TYPE="Date">{tally_date(fd)}</SVFROMDATE>
+                    <SVTODATE TYPE="Date">{tally_date(td)}</SVTODATE>
                 </STATICVARIABLES>
                 <TDL>
                     <TDLMESSAGE>
@@ -132,7 +144,7 @@ def get_all_ledgers_with_vouchers_xml(fy="2026-27", from_date=None, to_date=None
                             <FILTERS>DateRangeFilter</FILTERS>
                         </COLLECTION>
                         <SYSTEM TYPE="Formulae" NAME="DateRangeFilter">
-                            $Date &gt;= $$Date:"{fd}" AND $Date &lt;= $$Date:"{td}"
+                            $Date &gt;= ##SVFromDate AND $Date &lt;= ##SVToDate
                         </SYSTEM>
                     </TDLMESSAGE>
                 </TDL>
@@ -143,6 +155,8 @@ def get_all_ledgers_with_vouchers_xml(fy="2026-27", from_date=None, to_date=None
 
 
 def get_voucher_detail_xml(master_id):
+    # Accepts either the MASTERID (as returned by the vouchers list) or the GUID.
+    safe_id = escape(str(master_id))
     return f"""
     <ENVELOPE>
         <HEADER>
@@ -173,7 +187,7 @@ def get_voucher_detail_xml(master_id):
                             <FILTERS>VoucherFilter</FILTERS>
                         </COLLECTION>
                         <SYSTEM TYPE="Formulae" NAME="VoucherFilter">
-                            $GUID = "{master_id}"
+                            $GUID = "{safe_id}" OR $$String:$MasterID = "{safe_id}"
                         </SYSTEM>
                     </TDLMESSAGE>
                 </TDL>

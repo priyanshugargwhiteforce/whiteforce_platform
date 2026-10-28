@@ -9,7 +9,7 @@ class VoucherService:
         self.client = client
 
     def get_vouchers(self, ledger_name: str, fy: str = "2026-27", from_date=None, to_date=None):
-        xml      = get_voucher_xml(ledger_name, fy)
+        xml      = get_voucher_xml(ledger_name, fy, from_date, to_date)
         response = self.client.send(xml)
         vouchers = parse_vouchers(response)
 
