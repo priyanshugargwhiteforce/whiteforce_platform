@@ -16,6 +16,7 @@ from .serializers import (
     ResumeListSerializer,
     ResumeMatchSerializer,
 )
+from .services.claude_extractor import extract_structured_data_claude
 from .services.file_classifier import classify_file
 from .services.jd_extractor import (
     JDExtractionError,
@@ -150,6 +151,9 @@ class SingleResumeParseView(APIView):
     throttle_classes = [SingleResumeParseThrottle]
     throttle_scope = 'single_resume_parse'
 
+    def parse(self, file_path, file_type, log_prefix):
+        return parse_single_resume(file_path, file_type, log_prefix=log_prefix)
+
     def post(self, request):
         f = request.FILES.get('file')
 
@@ -194,7 +198,7 @@ class SingleResumeParseView(APIView):
             file_type = classify_file(file_path)
             resume.file_type = file_type
 
-            result = parse_single_resume(file_path, file_type, log_prefix=f"Resume#{resume.id} (single): ")
+            result = self.parse(file_path, file_type, log_prefix=f"Resume#{resume.id} (single): ")
 
             resume.raw_text = result["raw_text"]
             resume.save(update_fields=['file_type', 'raw_text', 'file_hash'])
@@ -222,6 +226,20 @@ class SingleResumeParseView(APIView):
 
         serializer = ResumeDetailSerializer(resume)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SingleResumeClaudeParseView(SingleResumeParseView):
+    """
+    POST /api/resumes/parse-claude/ -- same request/response as /parse/, but
+    the resume is parsed by Claude (settings.CLAUDE_MODEL, ANTHROPIC_API_KEY)
+    instead of Gemini.
+    """
+
+    def parse(self, file_path, file_type, log_prefix):
+        return parse_single_resume(
+            file_path, file_type, log_prefix=log_prefix.replace("(single)", "(single-claude)"),
+            extractor=extract_structured_data_claude, llm_method="llm_claude",
+        )
 
 
 class BatchStatusView(APIView):

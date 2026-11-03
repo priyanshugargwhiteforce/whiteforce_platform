@@ -77,24 +77,24 @@ TEMPLATES = [
 ]
 
 # Database ──────────────────────────────────────────────────────────────────
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('DB_NAME'),
-        'USER': os.environ.get('DB_USER'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', 'Whiteforce123@'),
-        'HOST': os.environ.get('DB_HOST', 'localhost'),
-        'PORT': os.environ.get('DB_PORT', '5432'),
-    }
-}
-
-# Local SQLite alternative (uncomment for quick local testing without Postgres):
 # DATABASES = {
 #     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': os.environ.get('DB_NAME'),
+#         'USER': os.environ.get('DB_USER'),
+#         'PASSWORD': os.environ.get('DB_PASSWORD', 'Whiteforce123@'),
+#         'HOST': os.environ.get('DB_HOST', 'localhost'),
+#         'PORT': os.environ.get('DB_PORT', '5432'),
 #     }
 # }
+
+# Local SQLite alternative (uncomment for quick local testing without Postgres):
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
 
 # ── Cache (used by notifications rate limiter) ────────────────────────────────
 CACHES = {
@@ -367,6 +367,15 @@ GEMINI_BULK_API_KEYS = [
 
 
 BULK_USE_GROQ = os.environ.get('BULK_USE_GROQ', 'true').lower() == 'true'
+
+# ── Claude — bulk-parse fallback after Groq + POST /api/resumes/parse-claude/ ──
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+# Only needed if the key is NOT scoped to a workspace (Console -> Workspaces -> ID, "wrkspc_...")
+ANTHROPIC_WORKSPACE_ID = os.environ.get('ANTHROPIC_WORKSPACE_ID', '')
+# Env names are prefixed with RESUME_ because Claude Code itself exports
+# CLAUDE_EFFORT, which Django would silently pick up if started from it.
+CLAUDE_MODEL = os.environ.get('RESUME_CLAUDE_MODEL', 'claude-haiku-5-5')
+CLAUDE_EFFORT = os.environ.get('RESUME_CLAUDE_EFFORT', 'low')  # low | medium | high
 # ── Email Validator ───────────────────────────────────────────────────────────
 EMAIL_VALIDATOR = {
     'MAX_WORKERS':      50,

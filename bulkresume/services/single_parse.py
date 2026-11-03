@@ -33,18 +33,22 @@ from .pipeline import OCR_DEEP_DIVE_SCORE_THRESHOLD, clean_resume_text
 logger = logging.getLogger('bulkresume')
 
 
-def parse_single_resume(file_path: str, file_type: str, log_prefix: str = "") -> dict:
+def parse_single_resume(file_path: str, file_type: str, log_prefix: str = "",
+                        extractor=extract_structured_data, llm_method: str = "llm") -> dict:
     """
     Mirrors process_resume()'s LLM-extract -> score -> (maybe) OCR deep-dive
     -> reparse block exactly, minus the dedup check. Returns a plain dict
     (not a dataclass) so the caller in views.py can pass it straight into
     build_profile_defaults() below without an extra import.
+
+    extractor / llm_method: Gemini + "llm" by default (POST /parse/); the
+    Claude endpoint passes extract_structured_data_claude + "llm_claude".
     """
     raw_text = extract_text(file_path, file_type)
     raw_text = clean_resume_text(raw_text)
 
-    extracted, needs_review = extract_structured_data(raw_text)
-    extraction_method = "regex_fallback" if needs_review else "llm"
+    extracted, needs_review = extractor(raw_text)
+    extraction_method = "regex_fallback" if needs_review else llm_method
 
     score = compute_parse_score(extracted, raw_text)
     ocr_deep_dive_used = False
@@ -58,7 +62,7 @@ def parse_single_resume(file_path: str, file_type: str, log_prefix: str = "") ->
             ocr_text = deep_dive_ocr_extract(file_path, file_type)
             if ocr_text:
                 ocr_text = clean_resume_text(ocr_text)
-                ocr_extracted, ocr_needs_review = extract_structured_data(ocr_text)
+                ocr_extracted, ocr_needs_review = extractor(ocr_text)
                 ocr_score = compute_parse_score(ocr_extracted, ocr_text)
 
                 logger.info(
@@ -69,7 +73,7 @@ def parse_single_resume(file_path: str, file_type: str, log_prefix: str = "") ->
                 if ocr_score.total_score > score.total_score:
                     extracted = ocr_extracted
                     needs_review = ocr_needs_review
-                    extraction_method = "regex_fallback" if needs_review else "llm_ocr_deep_dive"
+                    extraction_method = "regex_fallback" if needs_review else f"{llm_method}_ocr_deep_dive"
                     raw_text = ocr_text
                     score = ocr_score
                     ocr_deep_dive_used = True

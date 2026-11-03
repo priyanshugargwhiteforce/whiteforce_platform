@@ -9,8 +9,7 @@ from .deep_dive_ocr import deep_dive_ocr_extract
 from .dedup_check import DedupCheckError, check_duplicate_in_db
 from .extractors import extract_text
 from .file_classifier import classify_file
-from .gemini_extractor import extract_structured_data_gemini
-from .gemini_keys import get_gemini_bulk_pool
+from .claude_extractor import extract_structured_data_claude
 from .llm_extractor import extract_structured_data
 from .parse_score import compute_parse_score
 from .regex_fallback import regex_extract_basic_fields
@@ -34,30 +33,25 @@ def clean_resume_text(text: str) -> str:
     return text.strip()
 
 
-def _extract_groq_then_gemini_bulk(text: str, log_prefix: str = ""):
+def _extract_groq_then_claude_bulk(text: str, log_prefix: str = ""):
     """
-    Bulk-upload extraction: Groq first; if Groq falls back to regex (e.g. all
-    Groq keys rate-limited), retry once with the dedicated BULK Gemini key
-    pool (GEMINI_BULK_API_KEY_n). Those keys are used ONLY here -- single
-    parse and JD matching keep using the normal GEMINI_API_KEY_n pool.
+    Bulk-upload extraction: Groq first (all GROQ_API_KEY_n keys); if Groq falls
+    back to regex (e.g. every key rate-limited), retry once with Claude
+    (settings.CLAUDE_MODEL, ANTHROPIC_API_KEY). Gemini is not used here.
 
-    Returns (extracted, needs_review, used_gemini).
+    Returns (extracted, needs_review, used_claude).
     Lives in this file (not bulk_route_parse.py) because bulk_route_parse
     imports from pipeline -- importing the other way would be circular.
     """
     if not getattr(settings, 'BULK_USE_GROQ', True):
-        extracted, needs_review = extract_structured_data_gemini(text, pool=get_gemini_bulk_pool())
+        extracted, needs_review = extract_structured_data_claude(text)
         return extracted, needs_review, not needs_review
     extracted, needs_review = extract_structured_data(text)
     if needs_review:
-        logger.info(f"{log_prefix}Groq fell back to regex, retrying with Gemini bulk keys")
-        try:
-            g_extracted, g_review = extract_structured_data_gemini(text, pool=get_gemini_bulk_pool())
-        except Exception as exc:
-            logger.warning(f"{log_prefix}Gemini bulk fallback failed: {exc!r}, keeping regex result")
-        else:
-            if not g_review:
-                return g_extracted, False, True
+        logger.info(f"{log_prefix}Groq fell back to regex, retrying with Claude")
+        c_extracted, c_review = extract_structured_data_claude(text)
+        if not c_review:
+            return c_extracted, False, True
     return extracted, needs_review, False
 
 
@@ -106,14 +100,14 @@ def process_resume(resume_id: int) -> None:
             logger.info(f"Resume#{resume.id} skipped: duplicate email/phone found in DB")
             return
 
-        # Groq first, then the dedicated bulk Gemini keys if Groq fell back to regex.
-        extracted, needs_review, used_gemini = _extract_groq_then_gemini_bulk(
+        # Groq first, then Claude if Groq fell back to regex.
+        extracted, needs_review, used_claude = _extract_groq_then_claude_bulk(
             raw_text, f"Resume#{resume.id}: "
         )
         if needs_review:
             extraction_method = "regex_fallback"
         else:
-            extraction_method = "llm_gemini_fallback" if used_gemini else "llm"
+            extraction_method = "llm_claude_fallback" if used_claude else "llm"
 
         score = compute_parse_score(extracted, raw_text)
         ocr_deep_dive_used = False
@@ -155,7 +149,7 @@ def process_resume(resume_id: int) -> None:
 
                 if ocr_text:
                     ocr_text = clean_resume_text(ocr_text)
-                    ocr_extracted, ocr_needs_review, ocr_gemini = _extract_groq_then_gemini_bulk(
+                    ocr_extracted, ocr_needs_review, ocr_claude = _extract_groq_then_claude_bulk(
                         ocr_text, f"Resume#{resume.id}: "
                     )
                     ocr_score = compute_parse_score(ocr_extracted, ocr_text)
@@ -172,7 +166,7 @@ def process_resume(resume_id: int) -> None:
                             extraction_method = "regex_fallback"
                         else:
                             extraction_method = (
-                                "llm_gemini_ocr_deep_dive" if ocr_gemini else "llm_ocr_deep_dive"
+                                "llm_claude_ocr_deep_dive" if ocr_claude else "llm_ocr_deep_dive"
                             )
                         raw_text = ocr_text
                         score = ocr_score

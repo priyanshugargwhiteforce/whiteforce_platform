@@ -7,12 +7,14 @@ from .views import (
     JDResumeMatchGeminiView,
     JDResumeMatchView,
     ResumeDetailView,
+    SingleResumeClaudeParseView,
     SingleResumeParseView,
 )
 
 urlpatterns = [
     path('bulk-upload/', BulkResumeUploadView.as_view(), name='bulk-resume-upload'),
     path('parse/', SingleResumeParseView.as_view(), name='single-resume-parse'),
+    path('parse-claude/', SingleResumeClaudeParseView.as_view(), name='single-resume-parse-claude'),
     path('batch/<str:batch_id>/status/', BatchStatusView.as_view(), name='batch-status'),
     path('match/', JDResumeMatchView.as_view(), name='jd-resume-match'),
     path('match/<str:batch_id>/status/', JDMatchBatchStatusView.as_view(), name='jd-resume-match-status'),
